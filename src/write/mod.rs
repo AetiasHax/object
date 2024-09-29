@@ -82,6 +82,9 @@ pub struct Object<'a> {
     pub mangling: Mangling,
     #[cfg(feature = "coff")]
     stub_symbols: HashMap<SymbolId, SymbolId>,
+    /// If `Some`, then emit .rela (true) or .rel (false), or else decide based on architecture.
+    #[cfg(feature = "elf")]
+    pub elf_is_rela: Option<bool>,
     /// Mach-O "_tlv_bootstrap" symbol.
     #[cfg(feature = "macho")]
     tlv_bootstrap: Option<SymbolId>,
@@ -112,6 +115,8 @@ impl<'a> Object<'a> {
             mangling: Mangling::default(format, architecture),
             #[cfg(feature = "coff")]
             stub_symbols: HashMap::new(),
+            #[cfg(feature = "elf")]
+            elf_is_rela: None,
             #[cfg(feature = "macho")]
             tlv_bootstrap: None,
             #[cfg(feature = "macho")]

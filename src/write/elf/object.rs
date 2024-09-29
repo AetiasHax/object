@@ -119,6 +119,10 @@ impl<'a> Object<'a> {
     }
 
     fn elf_has_relocation_addend(&self) -> Result<bool> {
+        if let Some(is_rela) = self.elf_is_rela {
+            return Ok(is_rela);
+        }
+
         Ok(match self.architecture {
             Architecture::Aarch64 => true,
             Architecture::Aarch64_Ilp32 => true,
