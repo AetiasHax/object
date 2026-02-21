@@ -124,6 +124,8 @@ impl fmt::Display for Error {
 
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
+#[cfg(all(not(feature = "std"), core_error))]
+impl core::error::Error for Error {}
 
 /// The result type used within the read module.
 pub type Result<T> = result::Result<T, Error>;
@@ -153,42 +155,27 @@ impl<T> ReadError<T> for Option<T> {
 /// The native executable file for the target platform.
 #[cfg(all(
     unix,
-    not(target_os = "macos"),
-    target_pointer_width = "32",
+    not(target_vendor = "apple"),
+    not(target_os = "aix"),
     feature = "elf"
 ))]
-pub type NativeFile<'data, R = &'data [u8]> = elf::ElfFile32<'data, crate::endian::Endianness, R>;
+pub type NativeFile<'data, R = &'data [u8]> = elf::NativeElfFile<'data, R>;
 
 /// The native executable file for the target platform.
-#[cfg(all(
-    unix,
-    not(target_os = "macos"),
-    target_pointer_width = "64",
-    feature = "elf"
-))]
-pub type NativeFile<'data, R = &'data [u8]> = elf::ElfFile64<'data, crate::endian::Endianness, R>;
+#[cfg(all(target_vendor = "apple", feature = "macho"))]
+pub type NativeFile<'data, R = &'data [u8]> = macho::NativeMachOFile<'data, R>;
 
 /// The native executable file for the target platform.
-#[cfg(all(target_os = "macos", target_pointer_width = "32", feature = "macho"))]
-pub type NativeFile<'data, R = &'data [u8]> =
-    macho::MachOFile32<'data, crate::endian::Endianness, R>;
+#[cfg(all(target_os = "windows", feature = "pe"))]
+pub type NativeFile<'data, R = &'data [u8]> = pe::NativePeFile<'data, R>;
 
 /// The native executable file for the target platform.
-#[cfg(all(target_os = "macos", target_pointer_width = "64", feature = "macho"))]
-pub type NativeFile<'data, R = &'data [u8]> =
-    macho::MachOFile64<'data, crate::endian::Endianness, R>;
-
-/// The native executable file for the target platform.
-#[cfg(all(target_os = "windows", target_pointer_width = "32", feature = "pe"))]
-pub type NativeFile<'data, R = &'data [u8]> = pe::PeFile32<'data, R>;
-
-/// The native executable file for the target platform.
-#[cfg(all(target_os = "windows", target_pointer_width = "64", feature = "pe"))]
-pub type NativeFile<'data, R = &'data [u8]> = pe::PeFile64<'data, R>;
-
-/// The native executable file for the target platform.
-#[cfg(all(feature = "wasm", target_arch = "wasm32", feature = "wasm"))]
+#[cfg(all(target_family = "wasm", feature = "wasm"))]
 pub type NativeFile<'data, R = &'data [u8]> = wasm::WasmFile<'data, R>;
+
+/// The native executable file for the target platform.
+#[cfg(all(target_os = "aix", feature = "xcoff"))]
+pub type NativeFile<'data, R = &'data [u8]> = xcoff::NativeXcoffFile<'data, R>;
 
 /// A file format kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -336,6 +323,10 @@ impl FileKind {
             | [0x64, 0xaa, ..]
             // COFF arm64ec
             | [0x41, 0xa6, ..]
+            // COFF ppc
+            | [0xf0, 0x01, ..]
+            | [0xf1, 0x01, ..]
+            | [0xf2, 0x01, ..]
             // COFF x86
             | [0x4c, 0x01, ..]
             // COFF x86-64
@@ -815,6 +806,7 @@ impl RelocationMap {
             addend: relocation.addend() as u64,
         };
         match relocation.kind() {
+            RelocationKind::None => {}
             RelocationKind::Absolute => match relocation.target() {
                 RelocationTarget::Symbol(symbol_idx) => {
                     let symbol = file
@@ -994,13 +986,30 @@ impl<'data> CompressedData<'data> {
                             .read_error("Invalid zlib compressed data")?;
                     }
                     CompressionFormat::Zstandard => {
-                        let mut decoder = ruzstd::StreamingDecoder::new(self.data)
-                            .ok()
-                            .read_error("Invalid zstd compressed data")?;
-                        decoder
-                            .read_to_end(&mut decompressed)
-                            .ok()
-                            .read_error("Invalid zstd compressed data")?;
+                        let mut input = self.data;
+                        while !input.is_empty() {
+                            let mut decoder = match ruzstd::decoding::StreamingDecoder::new(&mut input) {
+                                Ok(decoder) => decoder,
+                                Err(
+                                    ruzstd::decoding::errors::FrameDecoderError::ReadFrameHeaderError(
+                                        ruzstd::decoding::errors::ReadFrameHeaderError::SkipFrame {
+                                            length,
+                                            ..
+                                        },
+                                    ),
+                                ) => {
+                                    input = input
+                                        .get(length as usize..)
+                                        .read_error("Invalid zstd compressed data")?;
+                                    continue;
+                                }
+                                x => x.ok().read_error("Invalid zstd compressed data")?,
+                            };
+                            decoder
+                                .read_to_end(&mut decompressed)
+                                .ok()
+                                .read_error("Invalid zstd compressed data")?;
+                        }
                     }
                     _ => unreachable!(),
                 }

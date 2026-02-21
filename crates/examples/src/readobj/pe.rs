@@ -654,9 +654,9 @@ fn print_relocations<'data, Coff: CoffHeader>(
                     | IMAGE_FILE_MACHINE_MIPSFPU
                     | IMAGE_FILE_MACHINE_MIPSFPU16 => FLAGS_IMAGE_REL_MIPS,
                     IMAGE_FILE_MACHINE_ALPHA | IMAGE_FILE_MACHINE_ALPHA64 => FLAGS_IMAGE_REL_ALPHA,
-                    IMAGE_FILE_MACHINE_POWERPC | IMAGE_FILE_MACHINE_POWERPCFP => {
-                        FLAGS_IMAGE_REL_PPC
-                    }
+                    IMAGE_FILE_MACHINE_POWERPC
+                    | IMAGE_FILE_MACHINE_POWERPCFP
+                    | IMAGE_FILE_MACHINE_POWERPCBE => FLAGS_IMAGE_REL_PPC,
                     IMAGE_FILE_MACHINE_SH3
                     | IMAGE_FILE_MACHINE_SH3DSP
                     | IMAGE_FILE_MACHINE_SH3E
@@ -676,9 +676,9 @@ fn print_relocations<'data, Coff: CoffHeader>(
                 let typ = relocation.typ.get(LE);
                 p.field_enum("Type", typ, proc);
                 match machine {
-                    IMAGE_FILE_MACHINE_POWERPC | IMAGE_FILE_MACHINE_POWERPCFP => {
-                        p.flags(typ, 0, FLAGS_IMAGE_REL_PPC_BITS)
-                    }
+                    IMAGE_FILE_MACHINE_POWERPC
+                    | IMAGE_FILE_MACHINE_POWERPCFP
+                    | IMAGE_FILE_MACHINE_POWERPCBE => p.flags(typ, 0, FLAGS_IMAGE_REL_PPC_BITS),
                     IMAGE_FILE_MACHINE_SH3
                     | IMAGE_FILE_MACHINE_SH3DSP
                     | IMAGE_FILE_MACHINE_SH3E
@@ -737,7 +737,8 @@ fn print_symbols<'data, Coff: CoffHeader>(
                         p.field_inline_string("Name", name);
                     });
                 }
-            } else if symbol.has_aux_function() {
+            }
+            if symbol.has_aux_function() {
                 if let Some(aux) = symbols.aux_function(index).print_err(p) {
                     p.group("ImageAuxSymbolFunction", |p| {
                         p.field("TagIndex", aux.tag_index.get(LE));
@@ -750,7 +751,8 @@ fn print_symbols<'data, Coff: CoffHeader>(
                         p.field("Unused", format!("{:X?}", aux.unused));
                     });
                 }
-            } else if symbol.has_aux_section() {
+            }
+            if symbol.has_aux_section() {
                 if let Some(aux) = symbols.aux_section(index).print_err(p) {
                     p.group("ImageAuxSymbolSection", |p| {
                         p.field_hex("Length", aux.length.get(LE));
@@ -764,8 +766,24 @@ fn print_symbols<'data, Coff: CoffHeader>(
                     });
                 }
             }
+            if symbol.has_aux_weak_external() {
+                if let Some(aux) = symbols.aux_weak_external(index).print_err(p) {
+                    p.group("ImageAuxWeak", |p| {
+                        let index = aux.default_symbol();
+                        let name = symbols
+                            .symbol(index)
+                            .and_then(|symbol| symbol.name(symbols.strings()))
+                            .print_err(p);
+                        p.field_string_option("DefaultSymbol", index.0, name);
+                        p.field_enum(
+                            "SearchType",
+                            aux.weak_search_type.get(LE),
+                            FLAGS_IMAGE_WEAK_EXTERN,
+                        );
+                    });
+                }
+            }
             // TODO: ImageAuxSymbolFunctionBeginEnd
-            // TODO: ImageAuxSymbolWeak
         });
     }
 }
@@ -1248,6 +1266,12 @@ const FLAGS_IMAGE_COMDAT_SELECT: &[Flag<u8>] = &flags!(
     IMAGE_COMDAT_SELECT_ASSOCIATIVE,
     IMAGE_COMDAT_SELECT_LARGEST,
     IMAGE_COMDAT_SELECT_NEWEST,
+);
+const FLAGS_IMAGE_WEAK_EXTERN: &[Flag<u32>] = &flags!(
+    IMAGE_WEAK_EXTERN_SEARCH_NOLIBRARY,
+    IMAGE_WEAK_EXTERN_SEARCH_LIBRARY,
+    IMAGE_WEAK_EXTERN_SEARCH_ALIAS,
+    IMAGE_WEAK_EXTERN_ANTI_DEPENDENCY,
 );
 const FLAGS_IMAGE_SUBSYSTEM: &[Flag<u16>] = &flags!(
     IMAGE_SUBSYSTEM_UNKNOWN,

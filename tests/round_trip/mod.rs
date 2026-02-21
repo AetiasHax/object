@@ -261,17 +261,24 @@ fn elf_any() {
     for (arch, endian) in [
         (Architecture::Aarch64, Endianness::Little),
         (Architecture::Aarch64_Ilp32, Endianness::Little),
+        (Architecture::Alpha, Endianness::Little),
         (Architecture::Arm, Endianness::Little),
         (Architecture::Avr, Endianness::Little),
         (Architecture::Bpf, Endianness::Little),
         (Architecture::Csky, Endianness::Little),
+        (Architecture::E2K32, Endianness::Little),
+        (Architecture::E2K64, Endianness::Little),
         (Architecture::I386, Endianness::Little),
         (Architecture::X86_64, Endianness::Little),
         (Architecture::X86_64_X32, Endianness::Little),
+        (Architecture::Hppa, Endianness::Big),
         (Architecture::Hexagon, Endianness::Little),
+        (Architecture::LoongArch32, Endianness::Little),
         (Architecture::LoongArch64, Endianness::Little),
+        (Architecture::M68k, Endianness::Big),
         (Architecture::Mips, Endianness::Little),
         (Architecture::Mips64, Endianness::Little),
+        (Architecture::Mips64_N32, Endianness::Little),
         (Architecture::Msp430, Endianness::Little),
         (Architecture::PowerPc, Endianness::Big),
         (Architecture::PowerPc64, Endianness::Big),
@@ -282,6 +289,7 @@ fn elf_any() {
         (Architecture::Sparc, Endianness::Big),
         (Architecture::Sparc32Plus, Endianness::Big),
         (Architecture::Sparc64, Endianness::Big),
+        (Architecture::SuperH, Endianness::Big),
         (Architecture::Xtensa, Endianness::Little),
     ]
     .iter()
@@ -325,6 +333,21 @@ fn elf_any() {
                 )
                 .unwrap();
         }
+        object
+            .add_relocation(
+                section,
+                write::Relocation {
+                    offset: 24,
+                    symbol,
+                    addend: 0,
+                    flags: RelocationFlags::Generic {
+                        kind: RelocationKind::None,
+                        encoding: RelocationEncoding::Generic,
+                        size: 0,
+                    },
+                },
+            )
+            .unwrap();
 
         let bytes = object.write().unwrap();
         let object = read::File::parse(&*bytes).unwrap();
@@ -359,6 +382,14 @@ fn elf_any() {
             assert_eq!(relocation.size(), 64);
             assert_eq!(relocation.addend(), 0);
         }
+
+        let (offset, relocation) = relocations.next().unwrap();
+        println!("{:?}", relocation);
+        assert_eq!(offset, 24);
+        assert_eq!(relocation.kind(), RelocationKind::None);
+        assert_eq!(relocation.encoding(), RelocationEncoding::Generic);
+        assert_eq!(relocation.size(), 0);
+        assert_eq!(relocation.addend(), 0);
     }
 }
 
@@ -493,15 +524,11 @@ fn macho_any() {
             Endianness::Little,
         ),
         (Architecture::Aarch64_Ilp32, None, Endianness::Little),
-        /* TODO:
         (Architecture::Arm, None, Endianness::Little),
-        */
         (Architecture::I386, None, Endianness::Little),
         (Architecture::X86_64, None, Endianness::Little),
-        /* TODO:
         (Architecture::PowerPc, None, Endianness::Big),
         (Architecture::PowerPc64, None, Endianness::Big),
-        */
     ]
     .iter()
     .copied()

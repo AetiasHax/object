@@ -42,6 +42,32 @@ fn rewrite_base_version() {
 }
 
 #[test]
+fn rewrite_base_relr() {
+    let print_options = readobj::PrintOptions {
+        string_indices: false,
+        ..readobj::PrintOptions::all()
+    };
+    let mut fail = false;
+
+    let options = object_rewrite::Options::default();
+    fail |= testfile(
+        "elf/base-relr-i686",
+        "elf/base-relr-i686.noop",
+        options,
+        &print_options,
+    );
+    let options = object_rewrite::Options::default();
+    fail |= testfile(
+        "elf/base-relr-x86_64",
+        "elf/base-relr-x86_64.noop",
+        options,
+        &print_options,
+    );
+
+    fail_message(fail);
+}
+
+#[test]
 fn rewrite_symbols() {
     let print_options = readobj::PrintOptions {
         string_indices: false,
@@ -208,6 +234,51 @@ fn rewrite_interpreter() {
     fail_message(fail);
 }
 
+#[test]
+fn rewrite_annobin_strtab() {
+    let print_options = readobj::PrintOptions {
+        string_indices: false,
+        segments: false,
+        sections: true,
+        elf_dynamic: false,
+        ..readobj::PrintOptions::none()
+    };
+    let mut fail = false;
+
+    let options = object_rewrite::Options::default();
+    fail |= testfile(
+        "elf/annobin-strtab",
+        "elf/annobin-strtab",
+        options,
+        &print_options,
+    );
+
+    fail_message(fail);
+}
+
+#[test]
+fn rewrite_nobits_offset_0() {
+    let print_options = readobj::PrintOptions {
+        string_indices: false,
+        segments: true,
+        sections: true,
+        elf_dynamic: true,
+        ..readobj::PrintOptions::none()
+    };
+    let mut fail = false;
+
+    let mut options = object_rewrite::Options::default();
+    options.elf.add_runpath = vec![b"/foo".to_vec(), b"/bar".to_vec()];
+    fail |= testfile(
+        "elf/base-mold-2.2",
+        "elf/base-mold-2.2.add-runpath",
+        options,
+        &print_options,
+    );
+
+    fail_message(fail);
+}
+
 fn testfile(
     in_path: &str,
     out_path: &str,
@@ -233,7 +304,13 @@ fn testfile(
 
     let mut out_data = Vec::new();
     let mut err_data = Vec::new();
-    readobj::print(&mut out_data, &mut err_data, &rewrite_data, print_options);
+    readobj::print(
+        &mut out_data,
+        &mut err_data,
+        &rewrite_data,
+        &[],
+        print_options,
+    );
 
     let update = env::var_os("OBJECT_TESTFILES_UPDATE").is_some();
     let mut fail = false;

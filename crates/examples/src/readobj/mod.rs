@@ -23,6 +23,8 @@ pub struct PrintOptions {
 
     // Mach-O specific selectors
     pub macho_load_commands: bool,
+    pub macho_function_starts: bool,
+    pub macho_exports_trie: bool,
 
     // PE specific selectors
     pub pe_rich: bool,
@@ -50,6 +52,8 @@ impl PrintOptions {
             elf_versions: true,
             elf_attributes: true,
             macho_load_commands: true,
+            macho_function_starts: true,
+            macho_exports_trie: true,
             pe_rich: true,
             pe_base_relocs: true,
             pe_imports: true,
@@ -73,6 +77,8 @@ impl PrintOptions {
             elf_versions: false,
             elf_attributes: false,
             macho_load_commands: false,
+            macho_function_starts: false,
+            macho_exports_trie: false,
             pe_rich: false,
             pe_base_relocs: false,
             pe_imports: false,
@@ -83,9 +89,15 @@ impl PrintOptions {
     }
 }
 
-pub fn print(w: &mut dyn Write, e: &mut dyn Write, file: &[u8], options: &PrintOptions) {
+pub fn print(
+    w: &mut dyn Write,
+    e: &mut dyn Write,
+    file: &[u8],
+    extra_files: &[&[u8]],
+    options: &PrintOptions,
+) {
     let mut printer = Printer::new(w, e, options);
-    print_object(&mut printer, file);
+    print_object(&mut printer, file, extra_files);
 }
 
 struct Printer<'a> {
@@ -268,7 +280,7 @@ macro_rules! flags {
     ($($name:ident),+ $(,)?) => ( [ $(Flag { value: $name, name: stringify!($name), }),+ ] )
 }
 
-fn print_object(p: &mut Printer<'_>, data: &[u8]) {
+fn print_object(p: &mut Printer<'_>, data: &[u8], extra_files: &[&[u8]]) {
     let kind = match object::FileKind::parse(data) {
         Ok(file) => file,
         Err(err) => {
@@ -281,33 +293,17 @@ fn print_object(p: &mut Printer<'_>, data: &[u8]) {
         object::FileKind::Coff => pe::print_coff(p, data),
         object::FileKind::CoffBig => pe::print_coff_big(p, data),
         object::FileKind::CoffImport => pe::print_coff_import(p, data),
-        object::FileKind::DyldCache => macho::print_dyld_cache(p, data),
+        object::FileKind::DyldCache => macho::print_dyld_cache(p, data, extra_files),
         object::FileKind::Elf32 => elf::print_elf32(p, data),
         object::FileKind::Elf64 => elf::print_elf64(p, data),
-        object::FileKind::MachO32 => macho::print_macho32(p, data, 0),
-        object::FileKind::MachO64 => macho::print_macho64(p, data, 0),
+        object::FileKind::MachO32 => macho::print_macho32(p, data, 0, None),
+        object::FileKind::MachO64 => macho::print_macho64(p, data, 0, None),
         object::FileKind::MachOFat32 => macho::print_macho_fat32(p, data),
         object::FileKind::MachOFat64 => macho::print_macho_fat64(p, data),
         object::FileKind::Pe32 => pe::print_pe32(p, data),
         object::FileKind::Pe64 => pe::print_pe64(p, data),
         object::FileKind::Xcoff32 => xcoff::print_xcoff32(p, data),
         object::FileKind::Xcoff64 => xcoff::print_xcoff64(p, data),
-        // TODO
-        _ => {}
-    }
-}
-
-fn print_object_at(p: &mut Printer<'_>, data: &[u8], offset: u64) {
-    let kind = match object::FileKind::parse_at(data, offset) {
-        Ok(file) => file,
-        Err(err) => {
-            println!("Failed to parse file: {}", err);
-            return;
-        }
-    };
-    match kind {
-        object::FileKind::MachO32 => macho::print_macho32(p, data, offset),
-        object::FileKind::MachO64 => macho::print_macho64(p, data, offset),
         // TODO
         _ => {}
     }
@@ -327,7 +323,7 @@ fn print_archive(p: &mut Printer<'_>, data: &[u8]) {
                 if member.is_thin() {
                     p.field("Size", member.size());
                 } else if let Some(data) = member.data(data).print_err(p) {
-                    print_object(p, data);
+                    print_object(p, data, &[]);
                 }
             }
         }

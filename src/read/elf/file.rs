@@ -3,19 +3,19 @@ use core::convert::TryInto;
 use core::fmt::Debug;
 use core::mem;
 
-use crate::elf;
-use crate::endian::{self, Endian, Endianness, U32};
+use crate::endian::{self, Endian, Endianness, NativeEndian, U32};
 use crate::pod::Pod;
 use crate::read::{
     self, util, Architecture, ByteString, Bytes, Error, Export, FileFlags, Import, Object,
     ObjectKind, ReadError, ReadRef, SectionIndex, StringTable, SymbolIndex,
 };
+use crate::{elf, SkipDebugList};
 
 use super::{
-    CompressionHeader, Dyn, ElfComdat, ElfComdatIterator, ElfDynamicRelocationIterator, ElfSection,
-    ElfSectionIterator, ElfSegment, ElfSegmentIterator, ElfSymbol, ElfSymbolIterator,
-    ElfSymbolTable, NoteHeader, ProgramHeader, Rel, Rela, RelocationSections, SectionHeader,
-    SectionTable, Sym, SymbolTable,
+    CompressionHeader, Dyn, DynamicTable, ElfComdat, ElfComdatIterator,
+    ElfDynamicRelocationIterator, ElfSection, ElfSectionIterator, ElfSegment, ElfSegmentIterator,
+    ElfSymbol, ElfSymbolIterator, ElfSymbolTable, NoteHeader, ProgramHeader, Rel, Rela,
+    RelocationSections, Relr, SectionHeader, SectionTable, Sym, SymbolTable,
 };
 
 /// A 32-bit ELF object file.
@@ -24,12 +24,21 @@ use super::{
 /// to [`crate::FileKind::Elf32`].
 pub type ElfFile32<'data, Endian = Endianness, R = &'data [u8]> =
     ElfFile<'data, elf::FileHeader32<Endian>, R>;
+
 /// A 64-bit ELF object file.
 ///
 /// This is a file that starts with [`elf::FileHeader64`], and corresponds
 /// to [`crate::FileKind::Elf64`].
 pub type ElfFile64<'data, Endian = Endianness, R = &'data [u8]> =
     ElfFile<'data, elf::FileHeader64<Endian>, R>;
+
+/// The ELF file format that matches the pointer width and endianness of the target platform.
+#[cfg(target_pointer_width = "32")]
+pub type NativeElfFile<'data, R = &'data [u8]> = ElfFile32<'data, NativeEndian, R>;
+
+/// The ELF file format that matches the pointer width and endianness of the target platform.
+#[cfg(target_pointer_width = "64")]
+pub type NativeElfFile<'data, R = &'data [u8]> = ElfFile64<'data, NativeEndian, R>;
 
 /// A partially parsed ELF file.
 ///
@@ -41,7 +50,7 @@ where
     R: ReadRef<'data>,
 {
     pub(super) endian: Elf::Endian,
-    pub(super) data: R,
+    pub(super) data: SkipDebugList<R>,
     pub(super) header: &'data Elf,
     pub(super) segments: &'data [Elf::ProgramHeader],
     pub(super) sections: SectionTable<'data, Elf, R>,
@@ -69,7 +78,7 @@ where
 
         Ok(ElfFile {
             endian,
-            data,
+            data: SkipDebugList(data),
             header,
             segments,
             sections,
@@ -86,7 +95,7 @@ where
 
     /// Returns the raw data.
     pub fn data(&self) -> R {
-        self.data
+        self.data.0
     }
 
     /// Returns the raw ELF file header.
@@ -139,6 +148,13 @@ where
         &self.relocations
     }
 
+    /// Get the first `SHT_DYNAMIC` section.
+    ///
+    /// Returns an empty dynamic table if there is no `SHT_DYNAMIC` section.
+    pub fn elf_dynamic_table(&self) -> read::Result<DynamicTable<'data, Elf, R>> {
+        self.sections.dynamic_table(self.endian, self.data.0)
+    }
+
     fn raw_section_by_name<'file>(
         &'file self,
         section_name: &[u8],
@@ -187,16 +203,56 @@ where
     Elf: FileHeader,
     R: ReadRef<'data>,
 {
-    type Segment<'file> = ElfSegment<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type SegmentIterator<'file> = ElfSegmentIterator<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type Section<'file> = ElfSection<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type SectionIterator<'file> = ElfSectionIterator<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type Comdat<'file> = ElfComdat<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type ComdatIterator<'file> = ElfComdatIterator<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type Symbol<'file> = ElfSymbol<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type SymbolIterator<'file> = ElfSymbolIterator<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type SymbolTable<'file> = ElfSymbolTable<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
-    type DynamicRelocationIterator<'file> = ElfDynamicRelocationIterator<'data, 'file, Elf, R> where Self: 'file, 'data: 'file;
+    type Segment<'file>
+        = ElfSegment<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SegmentIterator<'file>
+        = ElfSegmentIterator<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type Section<'file>
+        = ElfSection<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SectionIterator<'file>
+        = ElfSectionIterator<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type Comdat<'file>
+        = ElfComdat<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type ComdatIterator<'file>
+        = ElfComdatIterator<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type Symbol<'file>
+        = ElfSymbol<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SymbolIterator<'file>
+        = ElfSymbolIterator<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SymbolTable<'file>
+        = ElfSymbolTable<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type DynamicRelocationIterator<'file>
+        = ElfDynamicRelocationIterator<'data, 'file, Elf, R>
+    where
+        Self: 'file,
+        'data: 'file;
 
     fn architecture(&self) -> Architecture {
         match (
@@ -205,18 +261,30 @@ where
         ) {
             (elf::EM_AARCH64, true) => Architecture::Aarch64,
             (elf::EM_AARCH64, false) => Architecture::Aarch64_Ilp32,
+            (elf::EM_ALPHA, true) => Architecture::Alpha,
             (elf::EM_ARM, _) => Architecture::Arm,
             (elf::EM_AVR, _) => Architecture::Avr,
             (elf::EM_BPF, _) => Architecture::Bpf,
             (elf::EM_CSKY, _) => Architecture::Csky,
+            (elf::EM_MCST_ELBRUS, false) => Architecture::E2K32,
+            (elf::EM_MCST_ELBRUS, true) => Architecture::E2K64,
             (elf::EM_386, _) => Architecture::I386,
             (elf::EM_X86_64, false) => Architecture::X86_64_X32,
             (elf::EM_X86_64, true) => Architecture::X86_64,
             (elf::EM_HEXAGON, _) => Architecture::Hexagon,
+            (elf::EM_LOONGARCH, false) => Architecture::LoongArch32,
             (elf::EM_LOONGARCH, true) => Architecture::LoongArch64,
-            (elf::EM_MIPS, false) => Architecture::Mips,
+            (elf::EM_68K, false) => Architecture::M68k,
+            (elf::EM_MIPS, false) => {
+                if (self.header.e_flags(self.endian) & elf::EF_MIPS_ABI2) != 0 {
+                    Architecture::Mips64_N32
+                } else {
+                    Architecture::Mips
+                }
+            }
             (elf::EM_MIPS, true) => Architecture::Mips64,
             (elf::EM_MSP430, _) => Architecture::Msp430,
+            (elf::EM_PARISC, _) => Architecture::Hppa,
             (elf::EM_PPC, _) => Architecture::PowerPc,
             (elf::EM_PPC64, _) => Architecture::PowerPc64,
             (elf::EM_RISCV, false) => Architecture::Riscv32,
@@ -230,6 +298,7 @@ where
             (elf::EM_SPARC32PLUS, false) => Architecture::Sparc32Plus,
             (elf::EM_SPARCV9, true) => Architecture::Sparc64,
             (elf::EM_XTENSA, false) => Architecture::Xtensa,
+            (elf::EM_SH, false) => Architecture::SuperH,
             _ => Architecture::Unknown,
         }
     }
@@ -336,7 +405,7 @@ where
     }
 
     fn imports(&self) -> read::Result<Vec<Import<'data>>> {
-        let versions = self.sections.versions(self.endian, self.data)?;
+        let versions = self.sections.versions(self.endian, self.data.0)?;
 
         let mut imports = Vec::new();
         for (index, symbol) in self.dynamic_symbols.enumerate() {
@@ -391,7 +460,7 @@ where
         // Use section headers if present, otherwise use program headers.
         if !self.sections.is_empty() {
             for section in self.sections.iter() {
-                if let Some(mut notes) = section.notes(endian, self.data)? {
+                if let Some(mut notes) = section.notes(endian, self.data.0)? {
                     while let Some(note) = notes.next()? {
                         if note.name() == elf::ELF_NOTE_GNU
                             && note.n_type(endian) == elf::NT_GNU_BUILD_ID
@@ -403,7 +472,7 @@ where
             }
         } else {
             for segment in self.segments {
-                if let Some(mut notes) = segment.notes(endian, self.data)? {
+                if let Some(mut notes) = segment.notes(endian, self.data.0)? {
                     while let Some(note) = notes.next()? {
                         if note.name() == elf::ELF_NOTE_GNU
                             && note.n_type(endian) == elf::NT_GNU_BUILD_ID
@@ -424,7 +493,7 @@ where
         };
         let data = section
             .section
-            .data(self.endian, self.data)
+            .data(self.endian, self.data.0)
             .read_error("Invalid ELF .gnu_debuglink section offset or size")
             .map(Bytes)?;
         let filename = data
@@ -445,7 +514,7 @@ where
         };
         let mut data = section
             .section
-            .data(self.endian, self.data)
+            .data(self.endian, self.data.0)
             .read_error("Invalid ELF .gnu_debugaltlink section offset or size")
             .map(Bytes)?;
         let filename = data
@@ -476,7 +545,7 @@ where
 #[allow(missing_docs)]
 pub trait FileHeader: Debug + Pod {
     // Ideally this would be a `u64: From<Word>`, but can't express that.
-    type Word: Into<u64>;
+    type Word: Into<u64> + Default + Copy;
     type Sword: Into<i64>;
     type Endian: endian::Endian;
     type ProgramHeader: ProgramHeader<Elf = Self, Endian = Self::Endian, Word = Self::Word>;
@@ -487,6 +556,7 @@ pub trait FileHeader: Debug + Pod {
     type Sym: Sym<Endian = Self::Endian, Word = Self::Word>;
     type Rel: Rel<Endian = Self::Endian, Word = Self::Word>;
     type Rela: Rela<Endian = Self::Endian, Word = Self::Word> + From<Self::Rel>;
+    type Relr: Relr<Endian = Self::Endian, Word = Self::Word>;
 
     /// Return true if this type is a 64-bit header.
     ///
@@ -776,6 +846,7 @@ impl<Endian: endian::Endian> FileHeader for elf::FileHeader32<Endian> {
     type Sym = elf::Sym32<Endian>;
     type Rel = elf::Rel32<Endian>;
     type Rela = elf::Rela32<Endian>;
+    type Relr = elf::Relr32<Endian>;
 
     #[inline]
     fn is_type_64(&self) -> bool {
@@ -873,6 +944,7 @@ impl<Endian: endian::Endian> FileHeader for elf::FileHeader64<Endian> {
     type Sym = elf::Sym64<Endian>;
     type Rel = elf::Rel64<Endian>;
     type Rela = elf::Rela64<Endian>;
+    type Relr = elf::Relr64<Endian>;
 
     #[inline]
     fn is_type_64(&self) -> bool {

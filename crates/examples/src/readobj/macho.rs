@@ -3,29 +3,40 @@ use object::macho::*;
 use object::read::macho::*;
 use object::BigEndian;
 
-pub(super) fn print_dyld_cache(p: &mut Printer<'_>, data: &[u8]) {
-    if let Some(header) = DyldCacheHeader::<Endianness>::parse(data).print_err(p) {
-        if let Some((_, endian)) = header.parse_magic().print_err(p) {
-            print_dyld_cache_header(p, endian, header);
-            let mappings = header.mappings(endian, data).print_err(p);
-            if let Some(mappings) = mappings {
-                print_dyld_cache_mappings(p, endian, mappings);
-            }
-            if let Some(images) = header.images(endian, data).print_err(p) {
-                print_dyld_cache_images(p, endian, data, mappings, images);
-            }
-        }
+trait PrinterMachoExt {
+    fn field_version(&mut self, name: &str, value: u32);
+}
+
+impl<'a> PrinterMachoExt for Printer<'a> {
+    fn field_version(&mut self, name: &str, value: u32) {
+        let major = (value >> 16) & 0xFFFF;
+        let minor = (value >> 8) & 0xFF;
+        let update = value & 0xFF;
+        self.field(name, format!("{}.{}.{}", major, minor, update));
     }
 }
 
-pub(super) fn print_dyld_cache_header(
-    p: &mut Printer<'_>,
-    endian: Endianness,
-    header: &DyldCacheHeader<Endianness>,
-) {
+pub(super) fn print_dyld_cache(p: &mut Printer<'_>, data: &[u8], subcache_data: &[&[u8]]) {
+    print_dyld_subcache(p, data);
+    for subcache in subcache_data {
+        print_dyld_subcache(p, subcache);
+    }
+    if let Some(cache) = DyldCache::<Endianness>::parse(data, subcache_data).print_err(p) {
+        print_dyld_cache_images(p, &cache);
+    }
+}
+
+pub(super) fn print_dyld_subcache(p: &mut Printer<'_>, data: &[u8]) {
     if !p.options.file {
         return;
     }
+    let Some(header) = DyldCacheHeader::<Endianness>::parse(data).print_err(p) else {
+        return;
+    };
+    let Some((_, endian)) = header.parse_magic().print_err(p) else {
+        return;
+    };
+
     p.group("DyldCacheHeader", |p| {
         p.field_bytes("Magic", &header.magic);
         p.field_hex("MappingOffset", header.mapping_offset.get(endian));
@@ -34,59 +45,138 @@ pub(super) fn print_dyld_cache_header(
         p.field("ImagesCount", header.images_count.get(endian));
         p.field_hex("DyldBaseAddress", header.dyld_base_address.get(endian));
     });
+
+    if let Some(mappings) = header.mappings(endian, data).print_err(p) {
+        match mappings {
+            DyldCacheMappingSlice::V1(info) => {
+                for mapping in info.iter() {
+                    print_dyld_cache_mapping_info(p, endian, mapping);
+                }
+            }
+            DyldCacheMappingSlice::V2(info) => {
+                for mapping in info.iter() {
+                    print_dyld_cache_mapping_and_slide_info(p, endian, data, mapping);
+                }
+            }
+            _ => panic!(
+                "If this case is hit, it means that someone added a variant to the (non-exhaustive) \
+                 DyldCacheMappingSlice enum and forgot to update this example"
+            ),
+        }
+    }
+    p.blank();
 }
 
-pub(super) fn print_dyld_cache_mappings(
+pub(super) fn print_dyld_cache_mapping_info(
     p: &mut Printer<'_>,
     endian: Endianness,
-    mappings: &[DyldCacheMappingInfo<Endianness>],
+    mapping: &DyldCacheMappingInfo<Endianness>,
 ) {
-    if !p.options.file {
-        return;
-    }
-    for mapping in mappings {
-        p.group("DyldCacheMappingInfo", |p| {
-            p.field_hex("Address", mapping.address.get(endian));
-            p.field_hex("Size", mapping.size.get(endian));
-            p.field_hex("FileOffset", mapping.file_offset.get(endian));
-            p.field_hex("MaxProt", mapping.max_prot.get(endian));
-            p.flags(mapping.max_prot.get(endian), 0, FLAGS_VM);
-            p.field_hex("InitProt", mapping.init_prot.get(endian));
-            p.flags(mapping.init_prot.get(endian), 0, FLAGS_VM);
-        });
-    }
+    p.group("DyldCacheMappingInfo", |p| {
+        p.field_hex("Address", mapping.address.get(endian));
+        p.field_hex("Size", mapping.size.get(endian));
+        p.field_hex("FileOffset", mapping.file_offset.get(endian));
+        p.field_hex("MaxProt", mapping.max_prot.get(endian));
+        p.flags(mapping.max_prot.get(endian), 0, FLAGS_VM);
+        p.field_hex("InitProt", mapping.init_prot.get(endian));
+        p.flags(mapping.init_prot.get(endian), 0, FLAGS_VM);
+    });
 }
 
-pub(super) fn print_dyld_cache_images(
+pub(super) fn print_dyld_cache_mapping_and_slide_info(
     p: &mut Printer<'_>,
     endian: Endianness,
     data: &[u8],
-    mappings: Option<&[DyldCacheMappingInfo<Endianness>]>,
-    images: &[DyldCacheImageInfo<Endianness>],
+    mapping: &DyldCacheMappingAndSlideInfo<Endianness>,
 ) {
-    for image in images {
+    p.group("DyldCacheMappingAndSlideInfo", |p| {
+        p.field_hex("Address", mapping.address.get(endian));
+        p.field_hex("Size", mapping.size.get(endian));
+        p.field_hex("FileOffset", mapping.file_offset.get(endian));
+        p.field_hex(
+            "SlideInfoFileOffset",
+            mapping.slide_info_file_offset.get(endian),
+        );
+        p.field_hex(
+            "SlideInfoFileSize",
+            mapping.slide_info_file_size.get(endian),
+        );
+        p.field_hex("Flags", mapping.flags.get(endian));
+        p.flags(mapping.flags.get(endian), 0, FLAGS_DYLD_CACHE_MAPPING);
+        p.field_hex("MaxProt", mapping.max_prot.get(endian));
+        p.flags(mapping.max_prot.get(endian), 0, FLAGS_VM);
+        p.field_hex("InitProt", mapping.init_prot.get(endian));
+        p.flags(mapping.init_prot.get(endian), 0, FLAGS_VM);
+    });
+
+    if let Some(slide) = mapping.slide(endian, data).print_err(p) {
+        match slide {
+            DyldCacheSlideInfo::V2 { slide, .. } => {
+                p.group("DyldCacheSlideInfo2", |p| {
+                    p.field("Version", slide.version.get(endian));
+                    p.field("PageSize", slide.page_size.get(endian));
+                    p.field_hex("PageStartsOffset", slide.page_starts_offset.get(endian));
+                    p.field_hex("PageStartsCount", slide.page_starts_count.get(endian));
+                    p.field_hex("PageExtrasOffset", slide.page_extras_offset.get(endian));
+                    p.field_hex("PageExtrasCount", slide.page_extras_count.get(endian));
+                    p.field_hex("DeltaMask", slide.delta_mask.get(endian));
+                    p.field_hex("ValueAdd", slide.value_add.get(endian));
+                });
+            }
+            DyldCacheSlideInfo::V3 { slide, .. } => {
+                p.group("DyldCacheSlideInfo3", |p| {
+                    p.field("Version", slide.version.get(endian));
+                    p.field("PageSize", slide.page_size.get(endian));
+                    p.field_hex("PageStartsCount", slide.page_starts_count.get(endian));
+                    p.field_hex("AuthValueAdd", slide.auth_value_add.get(endian));
+                });
+            }
+            DyldCacheSlideInfo::V5 { slide, .. } => {
+                p.group("DyldCacheSlideInfo5", |p| {
+                    p.field("Version", slide.version.get(endian));
+                    p.field("PageSize", slide.page_size.get(endian));
+                    p.field_hex("PageStartsCount", slide.page_starts_count.get(endian));
+                    p.field_hex("ValueAdd", slide.value_add.get(endian));
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(super) fn print_dyld_cache_images(p: &mut Printer<'_>, cache: &DyldCache) {
+    let endian = cache.endianness();
+    let data = cache.data();
+    for image in cache.images() {
         if p.options.file {
+            let info = image.info();
             p.group("DyldCacheImageInfo", |p| {
-                p.field_hex("Address", image.address.get(endian));
-                p.field_hex("ModTime", image.mod_time.get(endian));
-                p.field_hex("Inode", image.inode.get(endian));
+                p.field_hex("Address", info.address.get(endian));
+                p.field_hex("ModTime", info.mod_time.get(endian));
+                p.field_hex("Inode", info.inode.get(endian));
                 p.field_string(
                     "Path",
-                    image.path_file_offset.get(endian),
-                    image.path(endian, data),
+                    info.path_file_offset.get(endian),
+                    info.path(endian, data),
                 );
-                p.field_hex("Pad", image.pad.get(endian));
+                p.field_hex("Pad", info.pad.get(endian));
             });
         }
-        if let Some(offset) =
-            mappings.and_then(|mappings| image.file_offset(endian, mappings).print_err(p))
-        {
-            if p.options.file {
-                p.blank();
-            }
-            print_object_at(p, data, offset);
+        if let Some((data, offset)) = image.image_data_and_offset().print_err(p) {
+            print_dyld_cache_image(p, data, offset, cache);
             p.blank();
         }
+    }
+}
+
+fn print_dyld_cache_image(p: &mut Printer<'_>, data: &[u8], offset: u64, cache: &DyldCache) {
+    let Some(kind) = object::FileKind::parse_at(data, offset).print_err(p) else {
+        return;
+    };
+    match kind {
+        object::FileKind::MachO32 => macho::print_macho32(p, data, offset, Some(cache)),
+        object::FileKind::MachO64 => macho::print_macho64(p, data, offset, Some(cache)),
+        _ => writeln!(p.w(), "Format: {:?}", kind).unwrap(),
     }
 }
 
@@ -100,7 +190,7 @@ pub(super) fn print_macho_fat32(p: &mut Printer<'_>, data: &[u8]) {
         for arch in fat.arches() {
             if let Some(data) = arch.data(data).print_err(p) {
                 p.blank();
-                print_object(p, data);
+                print_object(p, data, &[]);
             }
         }
     }
@@ -116,7 +206,7 @@ pub(super) fn print_macho_fat64(p: &mut Printer<'_>, data: &[u8]) {
         for arch in fat.arches() {
             if let Some(data) = arch.data(data).print_err(p) {
                 p.blank();
-                print_object(p, data);
+                print_object(p, data, &[]);
             }
         }
     }
@@ -144,26 +234,38 @@ pub(super) fn print_fat_arch<Arch: FatArch>(p: &mut Printer<'_>, arch: &Arch) {
     });
 }
 
-pub(super) fn print_macho32(p: &mut Printer<'_>, data: &[u8], offset: u64) {
+pub(super) fn print_macho32(
+    p: &mut Printer<'_>,
+    data: &[u8],
+    offset: u64,
+    cache: Option<&DyldCache>,
+) {
     if let Some(header) = MachHeader32::parse(data, offset).print_err(p) {
         writeln!(p.w(), "Format: Mach-O 32-bit").unwrap();
-        print_macho(p, header, data, offset);
+        print_macho(p, header, data, offset, cache);
     }
 }
 
-pub(super) fn print_macho64(p: &mut Printer<'_>, data: &[u8], offset: u64) {
+pub(super) fn print_macho64(
+    p: &mut Printer<'_>,
+    data: &[u8],
+    offset: u64,
+    cache: Option<&DyldCache>,
+) {
     if let Some(header) = MachHeader64::parse(data, offset).print_err(p) {
         writeln!(p.w(), "Format: Mach-O 64-bit").unwrap();
-        print_macho(p, header, data, offset);
+        print_macho(p, header, data, offset, cache);
     }
 }
 
 #[derive(Default)]
 struct MachState<'a> {
     cputype: u32,
+    linkedit_data: &'a [u8],
     symbols: Vec<Option<&'a [u8]>>,
     sections: Vec<Vec<u8>>,
     section_index: usize,
+    text_segment_addr: u64,
 }
 
 fn print_macho<Mach: MachHeader<Endian = Endianness>>(
@@ -171,16 +273,36 @@ fn print_macho<Mach: MachHeader<Endian = Endianness>>(
     header: &Mach,
     data: &[u8],
     offset: u64,
+    cache: Option<&DyldCache>,
 ) {
     if let Some(endian) = header.endian().print_err(p) {
         let mut state = MachState {
             cputype: header.cputype(endian),
+            linkedit_data: data,
+            // Dummy first entry because section index starts at 1.
             sections: vec![vec![]],
             ..MachState::default()
         };
-        if let Ok(mut commands) = header.load_commands(endian, data, 0) {
+        // Scan the load commands for info that we need to reference during parsing.
+        if let Ok(mut commands) = header.load_commands(endian, data, offset) {
+            let mut symtab_command = None;
             while let Ok(Some(command)) = commands.next() {
                 if let Ok(Some((segment, section_data))) = Mach::Segment::from_command(command) {
+                    if segment.name() == macho::SEG_TEXT.as_bytes() {
+                        state.text_segment_addr = segment.vmaddr(endian).into();
+                    }
+                    if let Some(cache) = cache {
+                        // The symbol table will be in the linkedit segment, but that may be in a
+                        // different subcache, so we need to remember the data for that subcache.
+                        // TODO: this logic should be in the object crate somehow. It already
+                        // exists there for MachOFile but we're not using that here.
+                        if segment.name() == macho::SEG_LINKEDIT.as_bytes() {
+                            let addr = segment.vmaddr(endian).into();
+                            if let Some((data, _offset)) = cache.data_and_offset_for_address(addr) {
+                                state.linkedit_data = data;
+                            }
+                        }
+                    }
                     if let Ok(segment_sections) = segment.sections(endian, section_data) {
                         state
                             .sections
@@ -193,13 +315,16 @@ fn print_macho<Mach: MachHeader<Endian = Endianness>>(
                             }));
                     }
                 } else if let Ok(Some(command)) = command.symtab() {
-                    if let Ok(symtab) = command.symbols::<Mach, _>(endian, data) {
-                        state.symbols.extend(
-                            symtab
-                                .iter()
-                                .map(|symbol| symbol.name(endian, symtab.strings()).ok()),
-                        );
-                    }
+                    symtab_command = Some(command);
+                }
+            }
+            if let Some(symtab_command) = symtab_command {
+                if let Ok(symtab) = symtab_command.symbols::<Mach, _>(endian, state.linkedit_data) {
+                    state.symbols.extend(
+                        symtab
+                            .iter()
+                            .map(|symbol| symbol.name(endian, symtab.strings()).ok()),
+                    );
                 }
             }
         }
@@ -255,7 +380,10 @@ fn print_load_command<Mach: MachHeader>(
                 print_segment(p, endian, data, segment, section_data, state);
             }
             LoadCommandVariant::Symtab(symtab) => {
-                print_symtab::<Mach>(p, endian, data, symtab, state);
+                print_symtab::<Mach>(p, endian, state.linkedit_data, symtab, state);
+            }
+            LoadCommandVariant::LinkeditData(linkedit) => {
+                print_linkedit_data::<Mach>(p, endian, linkedit, state);
             }
             _ => {}
         }
@@ -265,7 +393,8 @@ fn print_load_command<Mach: MachHeader>(
         match variant {
             LoadCommandVariant::Segment32(..)
             | LoadCommandVariant::Segment64(..)
-            | LoadCommandVariant::Symtab(..) => {}
+            | LoadCommandVariant::Symtab(..)
+            | LoadCommandVariant::LinkeditData(..) => {}
             LoadCommandVariant::Thread(x, _thread_data) => {
                 p.group("ThreadCommand", |p| {
                     p.field_enum("Cmd", x.cmd.get(endian), FLAGS_LC);
@@ -309,8 +438,8 @@ fn print_load_command<Mach: MachHeader>(
                             command.string(endian, x.dylib.name),
                         );
                         p.field("Timestamp", x.dylib.timestamp.get(endian));
-                        p.field_hex("CurrentVersion", x.dylib.current_version.get(endian));
-                        p.field_hex(
+                        p.field_version("CurrentVersion", x.dylib.current_version.get(endian));
+                        p.field_version(
                             "CompatibilityVersion",
                             x.dylib.compatibility_version.get(endian),
                         );
@@ -450,14 +579,6 @@ fn print_load_command<Mach: MachHeader>(
                     );
                 });
             }
-            LoadCommandVariant::LinkeditData(x) => {
-                p.group("LinkeditDataCommand", |p| {
-                    p.field_enum("Cmd", x.cmd.get(endian), FLAGS_LC);
-                    p.field_hex("CmdSize", x.cmdsize.get(endian));
-                    p.field_hex("DataOffset", x.dataoff.get(endian));
-                    p.field_hex("DataSize", x.datasize.get(endian));
-                });
-            }
             LoadCommandVariant::EncryptionInfo32(x) => {
                 p.group("EncryptionInfoCommand32", |p| {
                     p.field_enum("Cmd", x.cmd.get(endian), FLAGS_LC);
@@ -498,8 +619,8 @@ fn print_load_command<Mach: MachHeader>(
                 p.group("VersionMinCommand", |p| {
                     p.field_enum("Cmd", x.cmd.get(endian), FLAGS_LC);
                     p.field_hex("CmdSize", x.cmdsize.get(endian));
-                    p.field_hex("Version", x.version.get(endian));
-                    p.field_hex("Sdk", x.sdk.get(endian));
+                    p.field_version("Version", x.version.get(endian));
+                    p.field_version("Sdk", x.sdk.get(endian));
                 });
             }
             LoadCommandVariant::EntryPoint(x) => {
@@ -540,8 +661,8 @@ fn print_load_command<Mach: MachHeader>(
                     p.field_enum("Cmd", x.cmd.get(endian), FLAGS_LC);
                     p.field_hex("CmdSize", x.cmdsize.get(endian));
                     p.field_enum("Platform", x.platform.get(endian), FLAGS_PLATFORM);
-                    p.field_hex("MinOs", x.minos.get(endian));
-                    p.field_hex("Sdk", x.sdk.get(endian));
+                    p.field_version("MinOs", x.minos.get(endian));
+                    p.field_version("Sdk", x.sdk.get(endian));
                     p.field_hex("NumberOfTools", x.ntools.get(endian));
                     // TODO: dump tools
                 });
@@ -645,6 +766,8 @@ fn print_section<S: Section>(
                 p.flags(flags, SECTION_TYPE, FLAGS_S_TYPE);
                 p.flags(flags, 0, FLAGS_S_ATTR);
             }
+            p.field_hex("Reserved1", section.reserved1(endian));
+            p.field_hex("Reserved2", section.reserved2(endian));
         }
         print_section_relocations(p, endian, data, section, state);
     });
@@ -770,6 +893,93 @@ fn print_symtab_symbols<Mach: MachHeader>(
                     p.flags(n_desc, 0, FLAGS_N_DESC);
                 }
                 p.field_hex("Value", nlist.n_value(endian).into());
+            });
+        }
+    }
+}
+
+fn print_linkedit_data<Mach: MachHeader>(
+    p: &mut Printer<'_>,
+    endian: Mach::Endian,
+    linkedit: &LinkeditDataCommand<Mach::Endian>,
+    state: &MachState,
+) {
+    let cmd = linkedit.cmd.get(endian);
+    let function_starts = p.options.macho_function_starts && cmd == macho::LC_FUNCTION_STARTS;
+    let exports_trie = p.options.macho_exports_trie && cmd == macho::LC_DYLD_EXPORTS_TRIE;
+    if !p.options.macho_load_commands && !function_starts && !exports_trie {
+        return;
+    }
+    p.group("LinkeditDataCommand", |p| {
+        p.field_enum("Cmd", cmd, FLAGS_LC);
+        p.field_hex("CmdSize", linkedit.cmdsize.get(endian));
+        p.field_hex("DataOffset", linkedit.dataoff.get(endian));
+        p.field_hex("DataSize", linkedit.datasize.get(endian));
+        if function_starts {
+            print_function_starts::<Mach>(p, endian, linkedit, state);
+        }
+        if exports_trie {
+            print_exports_trie::<Mach>(p, endian, linkedit, state);
+        }
+    });
+}
+
+fn print_function_starts<Mach: MachHeader>(
+    p: &mut Printer<'_>,
+    endian: Mach::Endian,
+    linkedit: &LinkeditDataCommand<Mach::Endian>,
+    state: &MachState,
+) {
+    let Some(mut function_starts) = linkedit
+        .function_starts(endian, state.linkedit_data, state.text_segment_addr)
+        .print_err(p)
+    else {
+        return;
+    };
+    p.group("FunctionStarts", |p| {
+        while let Some(Some(addr)) = function_starts.next().print_err(p) {
+            p.field_hex("Address", addr);
+        }
+    });
+}
+
+fn print_exports_trie<Mach: MachHeader>(
+    p: &mut Printer<'_>,
+    endian: Mach::Endian,
+    linkedit: &LinkeditDataCommand<Mach::Endian>,
+    state: &MachState,
+) {
+    if let Some(mut exports_trie) = linkedit
+        .exports_trie(endian, state.linkedit_data)
+        .print_err(p)
+    {
+        while let Some(Some(export_symbol)) = exports_trie.next().print_err(p) {
+            p.group("ExportSymbol", |p| {
+                p.field_inline_string("Name", export_symbol.name());
+                p.field_hex("Flags", export_symbol.flags());
+                p.flags(export_symbol.flags(), 0, FLAGS_EXPORT_SYMBOL);
+                p.flags(
+                    export_symbol.flags(),
+                    EXPORT_SYMBOL_FLAGS_KIND_MASK,
+                    FLAGS_EXPORT_SYMBOL_KIND,
+                );
+                match export_symbol.data() {
+                    ExportData::Regular { address } => p.field_hex("Address", address),
+                    ExportData::Reexport {
+                        dylib_ordinal,
+                        import_name,
+                    } => {
+                        p.field_hex("DylibOrdinal", dylib_ordinal);
+                        p.field_inline_string("ImportName", import_name);
+                    }
+                    ExportData::StubAndResolver {
+                        stub_address,
+                        resolver_address,
+                    } => {
+                        p.field_hex("StubAddress", stub_address);
+                        p.field_hex("ResolverAddress", resolver_address);
+                    }
+                }
             });
         }
     }
@@ -931,6 +1141,13 @@ const FLAGS_CPU_SUBTYPE_ARM64: &[Flag<u32>] = &flags!(
 );
 const FLAGS_CPU_SUBTYPE_ARM64_32: &[Flag<u32>] =
     &flags!(CPU_SUBTYPE_ARM64_32_ALL, CPU_SUBTYPE_ARM64_32_V8);
+const FLAGS_DYLD_CACHE_MAPPING: &[Flag<u64>] = &flags!(
+    DYLD_CACHE_MAPPING_AUTH_DATA,
+    DYLD_CACHE_MAPPING_DIRTY_DATA,
+    DYLD_CACHE_MAPPING_CONST_DATA,
+    DYLD_CACHE_MAPPING_TEXT_STUBS,
+    DYLD_CACHE_DYNAMIC_CONFIG_DATA,
+);
 const FLAGS_MH_FILETYPE: &[Flag<u32>] = &flags!(
     MH_OBJECT,
     MH_EXECUTE,
@@ -1180,4 +1397,14 @@ const FLAGS_X86_64_RELOC: &[Flag<u8>] = &flags!(
     X86_64_RELOC_SIGNED_2,
     X86_64_RELOC_SIGNED_4,
     X86_64_RELOC_TLV,
+);
+const FLAGS_EXPORT_SYMBOL: &[Flag<u8>] = &flags!(
+    EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION,
+    EXPORT_SYMBOL_FLAGS_REEXPORT,
+    EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER,
+);
+const FLAGS_EXPORT_SYMBOL_KIND: &[Flag<u8>] = &flags!(
+    EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
+    EXPORT_SYMBOL_FLAGS_KIND_THREAD_LOCAL,
+    EXPORT_SYMBOL_FLAGS_KIND_ABSOLUTE,
 );

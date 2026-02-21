@@ -4,7 +4,7 @@ use core::mem;
 use crate::endian::Endian;
 use crate::macho;
 use crate::pod::Pod;
-use crate::read::macho::{MachHeader, SymbolTable};
+use crate::read::macho::{ExportsTrieIterator, FunctionStartsIterator, MachHeader, SymbolTable};
 use crate::read::{Bytes, Error, ReadError, ReadRef, Result, StringTable};
 
 /// An iterator for the load commands from a [`MachHeader`].
@@ -195,8 +195,6 @@ impl<'data, E: Endian> LoadCommandData<'data, E> {
     }
 
     /// Try to parse this command as a [`macho::SymtabCommand`].
-    ///
-    /// Returns the segment command and the data containing the sections.
     pub fn symtab(self) -> Result<Option<&'data macho::SymtabCommand<E>>> {
         if self.cmd == macho::LC_SYMTAB {
             Some(self.data()).transpose()
@@ -261,6 +259,19 @@ impl<'data, E: Endian> LoadCommandData<'data, E> {
     pub fn entry_point(self) -> Result<Option<&'data macho::EntryPointCommand<E>>> {
         if self.cmd == macho::LC_MAIN {
             Some(self.data()).transpose()
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Try to parse this command as an `LC_UNIXTHREAD` [`macho::ThreadCommand`].
+    ///
+    /// Returns the thread command and the thread state data that follows it.
+    pub fn unix_thread(self) -> Result<Option<(&'data macho::ThreadCommand<E>, &'data [u8])>> {
+        if self.cmd == macho::LC_UNIXTHREAD {
+            let mut data = self.data;
+            let thread = data.read().read_error("Invalid Mach-O command size")?;
+            Ok(Some((thread, data.0)))
         } else {
             Ok(None)
         }
@@ -383,6 +394,52 @@ impl<E: Endian> macho::SymtabCommand<E> {
     }
 }
 
+impl<E: Endian> macho::LinkeditDataCommand<E> {
+    /// Return an iterator over the function start addresses.
+    ///
+    /// Only works if the command is a `LC_FUNCTION_STARTS` command.
+    ///
+    /// # Arguments
+    /// * `text_segment_addr` - The VM address of the __TEXT segment.
+    pub fn function_starts<'data, R: ReadRef<'data>>(
+        &self,
+        endian: E,
+        data: R,
+        text_segment_addr: u64,
+    ) -> Result<FunctionStartsIterator<'data>> {
+        if self.cmd.get(endian) != macho::LC_FUNCTION_STARTS {
+            return Err(Error("Not a function starts command"));
+        }
+        let data = data
+            .read_bytes_at(
+                self.dataoff.get(endian).into(),
+                self.datasize.get(endian).into(),
+            )
+            .read_error("Invalid function starts offset or size")?;
+        Ok(FunctionStartsIterator::new(data, text_segment_addr))
+    }
+
+    /// Return an iterator over the exports trie.
+    ///
+    /// Only works if the command is a `LC_DYLD_EXPORTS_TRIE` command.
+    pub fn exports_trie<'data, R: ReadRef<'data>>(
+        &self,
+        endian: E,
+        data: R,
+    ) -> Result<ExportsTrieIterator<'data>> {
+        if self.cmd.get(endian) != macho::LC_DYLD_EXPORTS_TRIE {
+            return Err(Error("Not an exports trie command"));
+        }
+        let data = data
+            .read_bytes_at(
+                self.dataoff.get(endian).into(),
+                self.datasize.get(endian).into(),
+            )
+            .read_error("Invalid exports trie offset or size")?;
+        Ok(ExportsTrieIterator::new(data))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +457,27 @@ mod tests {
         let mut commands =
             LoadCommandIterator::new(LittleEndian, &Align([0, 0, 0, 0, 8, 0, 0, 0, 0]).0, 10);
         assert!(commands.next().is_ok());
+    }
+
+    #[test]
+    fn function_starts_invalid_uleb128() {
+        use crate::macho;
+
+        // Invalid ULEB128: continuation bit set but no following byte
+        let data = [0x80];
+
+        let cmd = macho::LinkeditDataCommand {
+            cmd: macho::LC_FUNCTION_STARTS.into(),
+            cmdsize: 16.into(),
+            dataoff: 0.into(),
+            datasize: (data.len() as u32).into(),
+        };
+
+        let mut iter = cmd.function_starts(LittleEndian, &data[..], 0).unwrap();
+
+        // First call returns error
+        assert!(iter.next().is_err());
+        // Second call returns None (iterator exhausted)
+        assert!(iter.next().transpose().is_none());
     }
 }

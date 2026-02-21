@@ -1,6 +1,7 @@
 //! Helper for writing ELF files.
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::convert::TryInto;
 use core::mem;
 
 use crate::elf;
@@ -1304,26 +1305,33 @@ impl<'a> Writer<'a> {
     }
 
     /// Write a dynamic string entry.
-    pub fn write_dynamic_string(&mut self, tag: u32, id: StringId) {
-        self.write_dynamic(tag, self.dynstr.get_offset(id) as u64);
+    pub fn write_dynamic_string(&mut self, tag: i64, id: StringId) -> Result<()> {
+        self.write_dynamic(tag, self.dynstr.get_offset(id) as u64)
     }
 
     /// Write a dynamic value entry.
-    pub fn write_dynamic(&mut self, d_tag: u32, d_val: u64) {
+    pub fn write_dynamic(&mut self, d_tag: i64, d_val: u64) -> Result<()> {
         let endian = self.endian;
         if self.is_64 {
             let d = elf::Dyn64 {
-                d_tag: U64::new(endian, d_tag.into()),
+                d_tag: I64::new(endian, d_tag),
                 d_val: U64::new(endian, d_val),
             };
             self.buffer.write(&d);
         } else {
+            let d_tag = d_tag
+                .try_into()
+                .map_err(|_| Error(format!("d_tag overflow: 0x{:x}", d_tag)))?;
+            let d_val = d_val
+                .try_into()
+                .map_err(|_| Error(format!("d_val overflow: 0x{:x}", d_val)))?;
             let d = elf::Dyn32 {
-                d_tag: U32::new(endian, d_tag),
-                d_val: U32::new(endian, d_val as u32),
+                d_tag: I32::new(endian, d_tag),
+                d_val: U32::new(endian, d_val),
             };
             self.buffer.write(&d);
         }
+        Ok(())
     }
 
     /// Reserve the section index for the dynamic table.
@@ -1978,6 +1986,30 @@ impl<'a> Writer<'a> {
         });
     }
 
+    /// Write the section header for a relative relocation section.
+    ///
+    /// `offset` is the file offset of the relocations.
+    /// `size` is the size of the section in bytes.
+    pub fn write_relative_relocation_section_header(
+        &mut self,
+        name: StringId,
+        offset: usize,
+        size: usize,
+    ) {
+        self.write_section_header(&SectionHeader {
+            name: Some(name),
+            sh_type: elf::SHT_RELA,
+            sh_flags: 0,
+            sh_addr: 0,
+            sh_offset: offset as u64,
+            sh_size: size as u64,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: self.elf_align as u64,
+            sh_entsize: self.class().relr_size() as u64,
+        });
+    }
+
     /// Reserve a file range for a COMDAT section.
     ///
     /// `count` is the number of sections in the COMDAT group.
@@ -2219,6 +2251,15 @@ impl Class {
             } else {
                 mem::size_of::<elf::Rel32<Endianness>>()
             }
+        }
+    }
+
+    /// Return the size of a relative relocation entry.
+    pub fn relr_size(self) -> usize {
+        if self.is_64 {
+            mem::size_of::<elf::Relr64<Endianness>>()
+        } else {
+            mem::size_of::<elf::Relr32<Endianness>>()
         }
     }
 

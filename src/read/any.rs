@@ -19,9 +19,10 @@ use crate::read::xcoff;
 use crate::read::{
     self, Architecture, BinaryFormat, CodeView, ComdatKind, CompressedData, CompressedFileRange,
     Error, Export, FileFlags, FileKind, Import, Object, ObjectComdat, ObjectKind, ObjectMap,
-    ObjectSection, ObjectSegment, ObjectSymbol, ObjectSymbolTable, ReadRef, Relocation,
-    RelocationMap, Result, SectionFlags, SectionIndex, SectionKind, SegmentFlags, SubArchitecture,
-    SymbolFlags, SymbolIndex, SymbolKind, SymbolMap, SymbolMapName, SymbolScope, SymbolSection,
+    ObjectSection, ObjectSegment, ObjectSymbol, ObjectSymbolTable, Permissions, ReadRef,
+    Relocation, RelocationMap, Result, SectionFlags, SectionIndex, SectionKind, SegmentFlags,
+    SubArchitecture, SymbolFlags, SymbolIndex, SymbolKind, SymbolMap, SymbolMapName, SymbolScope,
+    SymbolSection,
 };
 
 /// Evaluate an expression on the contents of a file format enum.
@@ -307,16 +308,56 @@ impl<'data, R> Object<'data> for File<'data, R>
 where
     R: ReadRef<'data>,
 {
-    type Segment<'file> = Segment<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type SegmentIterator<'file> = SegmentIterator<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type Section<'file> = Section<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type SectionIterator<'file> = SectionIterator<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type Comdat<'file> = Comdat<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type ComdatIterator<'file> = ComdatIterator<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type Symbol<'file> = Symbol<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type SymbolIterator<'file> = SymbolIterator<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type SymbolTable<'file> = SymbolTable<'data, 'file, R> where Self: 'file, 'data: 'file;
-    type DynamicRelocationIterator<'file> = DynamicRelocationIterator<'data, 'file, R> where Self: 'file, 'data: 'file;
+    type Segment<'file>
+        = Segment<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SegmentIterator<'file>
+        = SegmentIterator<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type Section<'file>
+        = Section<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SectionIterator<'file>
+        = SectionIterator<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type Comdat<'file>
+        = Comdat<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type ComdatIterator<'file>
+        = ComdatIterator<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type Symbol<'file>
+        = Symbol<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SymbolIterator<'file>
+        = SymbolIterator<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type SymbolTable<'file>
+        = SymbolTable<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
+    type DynamicRelocationIterator<'file>
+        = DynamicRelocationIterator<'data, 'file, R>
+    where
+        Self: 'file,
+        'data: 'file;
 
     fn architecture(&self) -> Architecture {
         with_inner!(self, File, |x| x.architecture())
@@ -576,6 +617,7 @@ impl<'data, 'file, R: ReadRef<'data>> fmt::Debug for Segment<'data, 'file, R> {
         }
         s.field("address", &self.address())
             .field("size", &self.size())
+            .field("permissions", &self.permissions())
             .finish()
     }
 }
@@ -617,6 +659,10 @@ impl<'data, 'file, R: ReadRef<'data>> ObjectSegment<'data> for Segment<'data, 'f
 
     fn flags(&self) -> SegmentFlags {
         with_inner!(self.inner, SegmentInternal, |x| x.flags())
+    }
+
+    fn permissions(&self) -> Permissions {
+        with_inner!(self.inner, SegmentInternal, |x| x.permissions())
     }
 }
 

@@ -128,6 +128,7 @@ fn print_program_headers<Elf: FileHeader>(
                 EM_PARISC => FLAGS_PT_PARISC,
                 EM_ARM => FLAGS_PT_ARM,
                 EM_IA_64 => FLAGS_PT_IA_64,
+                EM_RISCV => FLAGS_PT_RISCV,
                 _ => &[],
             };
             let os = match elf.e_ident().os_abi {
@@ -213,9 +214,9 @@ fn print_segment_dynamic<Elf: FileHeader>(
         let mut strsz = 0;
         for d in dynamic {
             let tag = d.d_tag(endian).into();
-            if tag == DT_STRTAB.into() {
+            if tag == DT_STRTAB {
                 strtab = d.d_val(endian).into();
-            } else if tag == DT_STRSZ.into() {
+            } else if tag == DT_STRSZ {
                 strsz = d.d_val(endian).into();
             }
         }
@@ -245,6 +246,7 @@ fn print_section_headers<Elf: FileHeader>(
             && !(p.options.symbols && sh_type == SHT_SYMTAB)
             && !(p.options.relocations && sh_type == SHT_REL)
             && !(p.options.relocations && sh_type == SHT_RELA)
+            && !(p.options.relocations && sh_type == SHT_CREL)
             && !(p.options.elf_dynamic && sh_type == SHT_DYNAMIC)
             && !(p.options.elf_dynamic_symbols && sh_type == SHT_DYNSYM)
             && !(p.options.elf_notes && sh_type == SHT_NOTE)
@@ -271,6 +273,7 @@ fn print_section_headers<Elf: FileHeader>(
                 EM_CSKY => FLAGS_SHT_CSKY,
                 EM_IA_64 => FLAGS_SHT_IA_64,
                 EM_X86_64 => FLAGS_SHT_X86_64,
+                EM_RISCV => FLAGS_SHT_RISCV,
                 _ => &[],
             };
             p.field_enums("Type", section.sh_type(endian), &[FLAGS_SHT, proc]);
@@ -317,6 +320,8 @@ fn print_section_headers<Elf: FileHeader>(
                 }
                 SHT_REL => print_section_rel(p, endian, data, elf, sections, section),
                 SHT_RELA => print_section_rela(p, endian, data, elf, sections, section),
+                SHT_RELR => print_section_relr(p, endian, data, elf, section),
+                SHT_CREL => print_section_crel(p, endian, data, elf, sections, section),
                 SHT_NOTE => print_section_notes(p, endian, data, elf, section),
                 SHT_DYNAMIC => print_section_dynamic(p, endian, data, elf, sections, section),
                 SHT_GROUP => print_section_group(p, endian, data, elf, sections, section),
@@ -423,6 +428,8 @@ fn print_section_symbols<Elf: FileHeader>(
                     match elf.e_machine(endian) {
                         EM_MIPS => p.flags(other, 0, FLAGS_STO_MIPS),
                         EM_ALPHA => p.flags(other, 0, FLAGS_STO_ALPHA),
+                        EM_AARCH64 => p.flags(other, 0, FLAGS_STO_AARCH64),
+                        EM_RISCV => p.flags(other, 0, FLAGS_STO_RISCV),
                         EM_PPC64 => p.field_hex(
                             "Local",
                             (other & STO_PPC64_LOCAL_MASK) >> STO_PPC64_LOCAL_BIT,
@@ -457,9 +464,13 @@ fn print_section_rel<Elf: FileHeader>(
         return;
     }
     if let Some(Some((relocations, link))) = section.rel(endian, data).print_err(p) {
-        let symbols = sections
-            .symbol_table_by_index(endian, data, link)
-            .print_err(p);
+        let symbols = if link.0 != 0 {
+            sections
+                .symbol_table_by_index(endian, data, link)
+                .print_err(p)
+        } else {
+            None
+        };
         let proc = rel_flag_type(endian, elf);
         for relocation in relocations {
             p.group("Relocation", |p| {
@@ -484,9 +495,13 @@ fn print_section_rela<Elf: FileHeader>(
         return;
     }
     if let Some(Some((relocations, link))) = section.rela(endian, data).print_err(p) {
-        let symbols = sections
-            .symbol_table_by_index(endian, data, link)
-            .print_err(p);
+        let symbols = if link.0 != 0 {
+            sections
+                .symbol_table_by_index(endian, data, link)
+                .print_err(p)
+        } else {
+            None
+        };
         let proc = rel_flag_type(endian, elf);
         for relocation in relocations {
             p.group("Relocation", |p| {
@@ -498,7 +513,7 @@ fn print_section_rela<Elf: FileHeader>(
                 );
                 let sym = relocation.symbol(endian, elf.is_mips64el(endian));
                 print_rel_symbol(p, endian, symbols, sym);
-                let addend = relocation.r_addend(endian).into() as u64;
+                let addend = relocation.r_addend(endian).into();
                 if addend != 0 {
                     p.field_hex("Addend", addend);
                 }
@@ -557,6 +572,62 @@ fn rel_flag_type<Elf: FileHeader>(endian: Elf::Endian, elf: &Elf) -> &'static [F
         EM_METAG => FLAGS_R_METAG,
         EM_NDS32 => FLAGS_R_NDS32,
         _ => &[],
+    }
+}
+
+fn print_section_relr<Elf: FileHeader>(
+    p: &mut Printer<'_>,
+    endian: Elf::Endian,
+    data: &[u8],
+    _elf: &Elf,
+    section: &Elf::SectionHeader,
+) {
+    if !p.options.relocations {
+        return;
+    }
+    if let Some(Some(relocations)) = section.relr(endian, data).print_err(p) {
+        for relocation in relocations {
+            p.field_hex("Offset", relocation.into());
+        }
+    }
+}
+
+fn print_section_crel<Elf: FileHeader>(
+    p: &mut Printer<'_>,
+    endian: Elf::Endian,
+    data: &[u8],
+    elf: &Elf,
+    sections: &SectionTable<Elf>,
+    section: &Elf::SectionHeader,
+) {
+    if !p.options.relocations {
+        return;
+    }
+
+    if let Some(Some((relocations, link))) = section.crel(endian, data).print_err(p) {
+        let symbols = if link.0 != 0 {
+            sections
+                .symbol_table_by_index(endian, data, link)
+                .print_err(p)
+        } else {
+            None
+        };
+        let proc = rel_flag_type(endian, elf);
+        for relocation_result in relocations {
+            let Some(relocation) = relocation_result.print_err(p) else {
+                return;
+            };
+
+            p.group("Relocation", |p| {
+                p.field_hex("Offset", relocation.r_offset);
+                p.field_enum("Type", relocation.r_type, proc);
+                print_rel_symbol(p, endian, symbols, relocation.symbol());
+                let addend = relocation.r_addend;
+                if addend != 0 {
+                    p.field_hex("Addend", addend);
+                }
+            });
+        }
     }
 }
 
@@ -711,31 +782,28 @@ fn print_dynamic<Elf: FileHeader>(
         EM_PPC => FLAGS_DT_PPC,
         EM_PPC64 => FLAGS_DT_PPC64,
         EM_IA_64 => FLAGS_DT_IA_64,
+        EM_AARCH64 => FLAGS_DT_AARCH64,
         EM_ALTERA_NIOS2 => FLAGS_DT_NIOS2,
+        EM_RISCV => FLAGS_DT_RISCV,
         _ => &[],
     };
     for d in dynamic {
         let tag = d.d_tag(endian).into();
         let val = d.d_val(endian).into();
         p.group("Dynamic", |p| {
-            if let Some(tag) = d.tag32(endian) {
-                p.field_enums("Tag", tag, &[FLAGS_DT, proc]);
-                if d.is_string(endian) {
-                    p.field_string("Value", val, d.string(endian, dynstr));
-                } else {
-                    p.field_hex("Value", val);
-                    if tag == DT_FLAGS {
-                        p.flags(val, 0, FLAGS_DF);
-                    } else if tag == DT_FLAGS_1 {
-                        p.flags(val, 0, FLAGS_DF_1);
-                    }
-                }
+            p.field_enums("Tag", tag, &[FLAGS_DT, proc]);
+            if d.is_string(endian) {
+                p.field_string("Value", val, d.string(endian, dynstr));
             } else {
-                p.field_hex("Tag", tag);
                 p.field_hex("Value", val);
+                if tag == DT_FLAGS {
+                    p.flags(val, 0, FLAGS_DF);
+                } else if tag == DT_FLAGS_1 {
+                    p.flags(val, 0, FLAGS_DF_1);
+                }
             }
         });
-        if tag == DT_NULL.into() {
+        if tag == DT_NULL {
             break;
         }
     }
@@ -1287,7 +1355,8 @@ const FLAGS_EF_SH_MACH: &[Flag<u32>] = &flags!(
     EF_SH2A_SH3E,
 );
 const FLAGS_EF_S390: &[Flag<u32>] = &flags!(EF_S390_HIGH_GPRS);
-const FLAGS_EF_RISCV: &[Flag<u32>] = &flags!(EF_RISCV_RVC, EF_RISCV_RVE, EF_RISCV_TSO);
+const FLAGS_EF_RISCV: &[Flag<u32>] =
+    &flags!(EF_RISCV_RVC, EF_RISCV_RVE, EF_RISCV_TSO, EF_RISCV_RV64ILP32);
 const FLAGS_EF_RISCV_FLOAT_ABI: &[Flag<u32>] = &flags!(
     EF_RISCV_FLOAT_ABI_SOFT,
     EF_RISCV_FLOAT_ABI_SINGLE,
@@ -1314,6 +1383,7 @@ const FLAGS_PT: &[Flag<u32>] = &flags!(
     PT_GNU_STACK,
     PT_GNU_RELRO,
     PT_GNU_PROPERTY,
+    PT_GNU_SFRAME
 );
 const FLAGS_PT_HP: &[Flag<u32>] = &flags!(
     PT_HP_TLS,
@@ -1341,6 +1411,7 @@ const FLAGS_PT_MIPS: &[Flag<u32>] = &flags!(
 const FLAGS_PT_PARISC: &[Flag<u32>] = &flags!(PT_PARISC_ARCHEXT, PT_PARISC_UNWIND);
 const FLAGS_PT_ARM: &[Flag<u32>] = &flags!(PT_ARM_EXIDX);
 const FLAGS_PT_IA_64: &[Flag<u32>] = &flags!(PT_IA_64_ARCHEXT, PT_IA_64_UNWIND);
+const FLAGS_PT_RISCV: &[Flag<u32>] = &flags!(PT_RISCV_ATTRIBUTES);
 const FLAGS_PF: &[Flag<u32>] = &flags!(PF_X, PF_W, PF_R);
 const FLAGS_PF_HP: &[Flag<u32>] = &flags!(
     PF_HP_PAGE_SIZE,
@@ -1373,6 +1444,9 @@ const FLAGS_SHT: &[Flag<u32>] = &flags!(
     SHT_PREINIT_ARRAY,
     SHT_GROUP,
     SHT_SYMTAB_SHNDX,
+    SHT_RELR,
+    SHT_LLVM_DEPENDENT_LIBRARIES,
+    SHT_GNU_SFRAME,
     SHT_GNU_ATTRIBUTES,
     SHT_GNU_HASH,
     SHT_GNU_LIBLIST,
@@ -1431,6 +1505,7 @@ const FLAGS_SHT_ARM: &[Flag<u32>] = &flags!(SHT_ARM_EXIDX, SHT_ARM_PREEMPTMAP, S
 const FLAGS_SHT_CSKY: &[Flag<u32>] = &flags!(SHT_CSKY_ATTRIBUTES);
 const FLAGS_SHT_IA_64: &[Flag<u32>] = &flags!(SHT_IA_64_EXT, SHT_IA_64_UNWIND);
 const FLAGS_SHT_X86_64: &[Flag<u32>] = &flags!(SHT_X86_64_UNWIND);
+const FLAGS_SHT_RISCV: &[Flag<u32>] = &flags!(SHT_RISCV_ATTRIBUTES);
 const FLAGS_SHF: &[Flag<u32>] = &flags!(
     SHF_WRITE,
     SHF_ALLOC,
@@ -1482,6 +1557,8 @@ const FLAGS_STB_MIPS: &[Flag<u8>] = &flags!(STB_MIPS_SPLIT_COMMON);
 const FLAGS_STV: &[Flag<u8>] = &flags!(STV_DEFAULT, STV_INTERNAL, STV_HIDDEN, STV_PROTECTED);
 const FLAGS_STO_MIPS: &[Flag<u8>] = &flags!(STO_MIPS_PLT);
 const FLAGS_STO_ALPHA: &[Flag<u8>] = &flags!(STO_ALPHA_NOPV, STO_ALPHA_STD_GPLOAD);
+const FLAGS_STO_AARCH64: &[Flag<u8>] = &flags!(STO_AARCH64_VARIANT_PCS);
+const FLAGS_STO_RISCV: &[Flag<u8>] = &flags!(STO_RISCV_VARIANT_CC);
 const FLAGS_SHN: &[Flag<u16>] = &flags!(SHN_UNDEF, SHN_ABS, SHN_COMMON, SHN_XINDEX);
 const FLAGS_SHN_MIPS: &[Flag<u16>] = &flags!(
     SHN_MIPS_ACOMMON,
@@ -2660,6 +2737,15 @@ const FLAGS_R_X86_64: &[Flag<u32>] = &flags!(
     R_X86_64_RELATIVE64,
     R_X86_64_GOTPCRELX,
     R_X86_64_REX_GOTPCRELX,
+    R_X86_64_CODE_4_GOTPCRELX,
+    R_X86_64_CODE_4_GOTTPOFF,
+    R_X86_64_CODE_4_GOTPC32_TLSDESC,
+    R_X86_64_CODE_5_GOTPCRELX,
+    R_X86_64_CODE_5_GOTTPOFF,
+    R_X86_64_CODE_5_GOTPC32_TLSDESC,
+    R_X86_64_CODE_6_GOTPCRELX,
+    R_X86_64_CODE_6_GOTTPOFF,
+    R_X86_64_CODE_6_GOTPC32_TLSDESC,
 );
 const FLAGS_R_MN10300: &[Flag<u32>] = &flags!(
     R_MN10300_NONE,
@@ -3052,6 +3138,7 @@ const FLAGS_R_RISCV: &[Flag<u32>] = &flags!(
     R_RISCV_TLS_DTPREL64,
     R_RISCV_TLS_TPREL32,
     R_RISCV_TLS_TPREL64,
+    R_RISCV_TLSDESC,
     R_RISCV_BRANCH,
     R_RISCV_JAL,
     R_RISCV_CALL,
@@ -3077,8 +3164,7 @@ const FLAGS_R_RISCV: &[Flag<u32>] = &flags!(
     R_RISCV_SUB16,
     R_RISCV_SUB32,
     R_RISCV_SUB64,
-    R_RISCV_GNU_VTINHERIT,
-    R_RISCV_GNU_VTENTRY,
+    R_RISCV_GOT32_PCREL,
     R_RISCV_ALIGN,
     R_RISCV_RVC_BRANCH,
     R_RISCV_RVC_JUMP,
@@ -3180,6 +3266,8 @@ const FLAGS_R_LOONGARCH: &[Flag<u32>] = &flags!(
     R_LARCH_TLS_TPREL32,
     R_LARCH_TLS_TPREL64,
     R_LARCH_IRELATIVE,
+    R_LARCH_TLS_DESC32,
+    R_LARCH_TLS_DESC64,
     R_LARCH_MARK_LA,
     R_LARCH_MARK_PCREL,
     R_LARCH_SOP_PUSH_PCREL,
@@ -3266,6 +3354,35 @@ const FLAGS_R_LOONGARCH: &[Flag<u32>] = &flags!(
     R_LARCH_SUB_ULEB128,
     R_LARCH_64_PCREL,
     R_LARCH_CALL36,
+    R_LARCH_TLS_DESC_PC_HI20,
+    R_LARCH_TLS_DESC_PC_LO12,
+    R_LARCH_TLS_DESC64_PC_LO20,
+    R_LARCH_TLS_DESC64_PC_HI12,
+    R_LARCH_TLS_DESC_HI20,
+    R_LARCH_TLS_DESC_LO12,
+    R_LARCH_TLS_DESC64_LO20,
+    R_LARCH_TLS_DESC64_HI12,
+    R_LARCH_TLS_DESC_LD,
+    R_LARCH_TLS_DESC_CALL,
+    R_LARCH_TLS_LE_HI20_R,
+    R_LARCH_TLS_LE_ADD_R,
+    R_LARCH_TLS_LE_LO12_R,
+    R_LARCH_TLS_LD_PCREL20_S2,
+    R_LARCH_TLS_GD_PCREL20_S2,
+    R_LARCH_TLS_DESC_PCREL20_S2,
+    R_LARCH_CALL30,
+    R_LARCH_PCADD_HI20,
+    R_LARCH_PCADD_LO12,
+    R_LARCH_GOT_PCADD_HI20,
+    R_LARCH_GOT_PCADD_LO12,
+    R_LARCH_TLS_IE_PCADD_HI20,
+    R_LARCH_TLS_IE_PCADD_LO12,
+    R_LARCH_TLS_LD_PCADD_HI20,
+    R_LARCH_TLS_LD_PCADD_LO12,
+    R_LARCH_TLS_GD_PCADD_HI20,
+    R_LARCH_TLS_GD_PCADD_LO12,
+    R_LARCH_TLS_DESC_PCADD_HI20,
+    R_LARCH_TLS_DESC_PCADD_LO12,
 );
 const FLAGS_NT_CORE: &[Flag<u32>] = &flags!(
     NT_PRSTATUS,
@@ -3372,7 +3489,7 @@ const FLAGS_GNU_PROPERTY_X86_FEATURE_1: &[Flag<u32>] = &flags!(
     GNU_PROPERTY_X86_FEATURE_1_SHSTK,
 );
 const FLAGS_GRP: &[Flag<u32>] = &flags!(GRP_COMDAT);
-const FLAGS_DT: &[Flag<u32>] = &flags!(
+const FLAGS_DT: &[Flag<i64>] = &flags!(
     DT_NULL,
     DT_NEEDED,
     DT_PLTRELSZ,
@@ -3440,8 +3557,8 @@ const FLAGS_DT: &[Flag<u32>] = &flags!(
     DT_AUXILIARY,
     DT_FILTER,
 );
-const FLAGS_DT_SPARC: &[Flag<u32>] = &flags!(DT_SPARC_REGISTER);
-const FLAGS_DT_MIPS: &[Flag<u32>] = &flags!(
+const FLAGS_DT_SPARC: &[Flag<i64>] = &flags!(DT_SPARC_REGISTER);
+const FLAGS_DT_MIPS: &[Flag<i64>] = &flags!(
     DT_MIPS_RLD_VERSION,
     DT_MIPS_TIME_STAMP,
     DT_MIPS_ICHECKSUM,
@@ -3489,12 +3606,18 @@ const FLAGS_DT_MIPS: &[Flag<u32>] = &flags!(
     DT_MIPS_RWPLT,
     DT_MIPS_RLD_MAP_REL,
 );
-const FLAGS_DT_ALPHA: &[Flag<u32>] = &flags!(DT_ALPHA_PLTRO);
-const FLAGS_DT_PPC: &[Flag<u32>] = &flags!(DT_PPC_GOT, DT_PPC_OPT);
-const FLAGS_DT_PPC64: &[Flag<u32>] =
+const FLAGS_DT_ALPHA: &[Flag<i64>] = &flags!(DT_ALPHA_PLTRO);
+const FLAGS_DT_PPC: &[Flag<i64>] = &flags!(DT_PPC_GOT, DT_PPC_OPT);
+const FLAGS_DT_PPC64: &[Flag<i64>] =
     &flags!(DT_PPC64_GLINK, DT_PPC64_OPD, DT_PPC64_OPDSZ, DT_PPC64_OPT);
-const FLAGS_DT_IA_64: &[Flag<u32>] = &flags!(DT_IA_64_PLT_RESERVE);
-const FLAGS_DT_NIOS2: &[Flag<u32>] = &flags!(DT_NIOS2_GP);
+const FLAGS_DT_IA_64: &[Flag<i64>] = &flags!(DT_IA_64_PLT_RESERVE);
+const FLAGS_DT_AARCH64: &[Flag<i64>] = &flags!(
+    DT_AARCH64_BTI_PLT,
+    DT_AARCH64_PAC_PLT,
+    DT_AARCH64_VARIANT_PCS
+);
+const FLAGS_DT_NIOS2: &[Flag<i64>] = &flags!(DT_NIOS2_GP);
+const FLAGS_DT_RISCV: &[Flag<i64>] = &flags!(DT_RISCV_VARIANT_CC);
 const FLAGS_DF: &[Flag<u32>] = &flags!(
     DF_ORIGIN,
     DF_SYMBOLIC,

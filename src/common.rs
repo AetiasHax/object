@@ -1,3 +1,8 @@
+use core::{
+    fmt,
+    ops::{Deref, DerefMut},
+};
+
 /// A CPU architecture.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -7,18 +12,26 @@ pub enum Architecture {
     Aarch64,
     #[allow(non_camel_case_types)]
     Aarch64_Ilp32,
+    Alpha,
     Arm,
     Avr,
     Bpf,
     Csky,
+    E2K32,
+    E2K64,
     I386,
     X86_64,
     #[allow(non_camel_case_types)]
     X86_64_X32,
     Hexagon,
+    Hppa,
+    LoongArch32,
     LoongArch64,
+    M68k,
     Mips,
     Mips64,
+    #[allow(non_camel_case_types)]
+    Mips64_N32,
     Msp430,
     PowerPc,
     PowerPc64,
@@ -30,6 +43,7 @@ pub enum Architecture {
     Sparc,
     Sparc32Plus,
     Sparc64,
+    SuperH,
     Wasm32,
     Wasm64,
     Xtensa,
@@ -53,17 +67,24 @@ impl Architecture {
             Architecture::Unknown => None,
             Architecture::Aarch64 => Some(AddressSize::U64),
             Architecture::Aarch64_Ilp32 => Some(AddressSize::U32),
+            Architecture::Alpha => Some(AddressSize::U64),
             Architecture::Arm => Some(AddressSize::U32),
             Architecture::Avr => Some(AddressSize::U8),
             Architecture::Bpf => Some(AddressSize::U64),
             Architecture::Csky => Some(AddressSize::U32),
+            Architecture::E2K32 => Some(AddressSize::U32),
+            Architecture::E2K64 => Some(AddressSize::U64),
             Architecture::I386 => Some(AddressSize::U32),
             Architecture::X86_64 => Some(AddressSize::U64),
             Architecture::X86_64_X32 => Some(AddressSize::U32),
             Architecture::Hexagon => Some(AddressSize::U32),
+            Architecture::Hppa => Some(AddressSize::U32),
+            Architecture::LoongArch32 => Some(AddressSize::U32),
             Architecture::LoongArch64 => Some(AddressSize::U64),
+            Architecture::M68k => Some(AddressSize::U32),
             Architecture::Mips => Some(AddressSize::U32),
             Architecture::Mips64 => Some(AddressSize::U64),
+            Architecture::Mips64_N32 => Some(AddressSize::U32),
             Architecture::Msp430 => Some(AddressSize::U16),
             Architecture::PowerPc => Some(AddressSize::U32),
             Architecture::PowerPc64 => Some(AddressSize::U64),
@@ -78,6 +99,7 @@ impl Architecture {
             Architecture::Wasm32 => Some(AddressSize::U32),
             Architecture::Wasm64 => Some(AddressSize::U64),
             Architecture::Xtensa => Some(AddressSize::U32),
+            Architecture::SuperH => Some(AddressSize::U32),
         }
     }
 }
@@ -326,6 +348,8 @@ pub enum SymbolScope {
 pub enum RelocationKind {
     /// The operation is unknown.
     Unknown,
+    /// No relocation.
+    None,
     /// S + A
     Absolute,
     /// S + A - P
@@ -415,6 +439,18 @@ pub enum RelocationEncoding {
     /// * 16-bit absolute address
     /// * 6-bit relative address
     SharcTypeB,
+
+    /// E2K 64-bit value stored in two LTS
+    ///
+    /// Memory representation:
+    /// ```text
+    /// 0: LTS1 = value[63:32]
+    /// 4: LTS0 = value[31:0]
+    /// ```
+    E2KLit,
+
+    /// E2K 28-bit value stored in CS0
+    E2KDisp,
 }
 
 /// File flags that are specific to each file format.
@@ -474,6 +510,75 @@ pub enum SegmentFlags {
         /// `Characteristics` field in the segment header.
         characteristics: u32,
     },
+}
+
+/// Memory permissions for a segment.
+///
+/// This is a simplified representation of segment permissions that abstracts
+/// over format-specific flags.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Permissions {
+    bits: u8,
+}
+
+impl core::fmt::Debug for Permissions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            if self.readable() { 'R' } else { '-' },
+            if self.writable() { 'W' } else { '-' },
+            if self.executable() { 'X' } else { '-' },
+        )
+    }
+}
+
+impl Permissions {
+    /// Permission bit for readable.
+    const R: u8 = 1 << 0;
+    /// Permission bit for writable.
+    const W: u8 = 1 << 1;
+    /// Permission bit for executable.
+    const X: u8 = 1 << 2;
+
+    /// Creates a new `Permissions` with the given flags.
+    pub fn new(readable: bool, writable: bool, executable: bool) -> Self {
+        let mut bits = 0;
+        if readable {
+            bits |= Self::R;
+        }
+        if writable {
+            bits |= Self::W;
+        }
+        if executable {
+            bits |= Self::X;
+        }
+        Permissions { bits }
+    }
+
+    /// Returns true if the segment is readable.
+    #[inline]
+    pub fn readable(&self) -> bool {
+        self.bits & Self::R != 0
+    }
+
+    /// Returns true if the segment is writable.
+    #[inline]
+    pub fn writable(&self) -> bool {
+        self.bits & Self::W != 0
+    }
+
+    /// Returns true if the segment is executable.
+    #[inline]
+    pub fn executable(&self) -> bool {
+        self.bits & Self::X != 0
+    }
+
+    /// Returns true if the segment is readable but not writable.
+    #[inline]
+    pub fn readonly(&self) -> bool {
+        self.readable() && !self.writable()
+    }
 }
 
 /// Section flags that are specific to each file format.
@@ -587,4 +692,30 @@ pub enum RelocationFlags {
         /// `r_rsize` field in the XCOFF relocation.
         r_rsize: u8,
     },
+}
+
+/// Wrapper to print as `[..]` without a manual `Debug` implementation, rather than dumping an
+/// entire byte array.
+#[allow(unused)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SkipDebugList<T>(pub T);
+
+impl<T> fmt::Debug for SkipDebugList<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[..]")
+    }
+}
+
+impl<T> Deref for SkipDebugList<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for SkipDebugList<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }

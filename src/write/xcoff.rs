@@ -1,6 +1,5 @@
 use core::mem;
 
-use crate::endian::{BigEndian as BE, I16, U16, U32};
 use crate::write::string::*;
 use crate::write::util::*;
 use crate::write::*;
@@ -20,6 +19,9 @@ struct SymbolOffsets {
     str_id: Option<StringId>,
     aux_count: u8,
     storage_class: u8,
+    x_smtyp: u8,
+    x_smclas: u8,
+    containing_csect: Option<SymbolId>,
 }
 
 impl<'a> Object<'a> {
@@ -63,6 +65,90 @@ impl<'a> Object<'a> {
                 // Unsupported section.
                 (&[], &[], SectionKind::Note, SectionFlags::None)
             }
+        }
+    }
+
+    pub(crate) fn xcoff_section_flags(&self, section: &Section<'_>) -> SectionFlags {
+        let s_flags = match section.kind {
+            SectionKind::Text
+            | SectionKind::ReadOnlyData
+            | SectionKind::ReadOnlyString
+            | SectionKind::ReadOnlyDataWithRel => xcoff::STYP_TEXT,
+            SectionKind::Data => xcoff::STYP_DATA,
+            SectionKind::UninitializedData => xcoff::STYP_BSS,
+            SectionKind::Tls => xcoff::STYP_TDATA,
+            SectionKind::UninitializedTls => xcoff::STYP_TBSS,
+            SectionKind::OtherString => xcoff::STYP_INFO,
+            SectionKind::Debug | SectionKind::DebugString => xcoff::STYP_DEBUG,
+            SectionKind::Other | SectionKind::Metadata => 0,
+            SectionKind::Note
+            | SectionKind::Linker
+            | SectionKind::Common
+            | SectionKind::Unknown
+            | SectionKind::TlsVariables
+            | SectionKind::Elf(_) => {
+                return SectionFlags::None;
+            }
+        }
+        .into();
+        SectionFlags::Xcoff { s_flags }
+    }
+
+    pub(crate) fn xcoff_symbol_flags(&self, symbol: &Symbol) -> SymbolFlags<SectionId, SymbolId> {
+        let n_sclass = match symbol.kind {
+            SymbolKind::File => xcoff::C_FILE,
+            SymbolKind::Text | SymbolKind::Data | SymbolKind::Tls => {
+                if symbol.is_local() {
+                    xcoff::C_STAT
+                } else if symbol.weak {
+                    xcoff::C_WEAKEXT
+                } else {
+                    xcoff::C_EXT
+                }
+            }
+            SymbolKind::Section | SymbolKind::Label | SymbolKind::Unknown => {
+                return SymbolFlags::None;
+            }
+        };
+        let (x_smtyp, x_smclas) = if n_sclass == xcoff::C_EXT
+            || n_sclass == xcoff::C_WEAKEXT
+            || n_sclass == xcoff::C_HIDEXT
+        {
+            let section_kind = if let SymbolSection::Section(id) = symbol.section {
+                self.sections[id.0].kind
+            } else {
+                SectionKind::Unknown
+            };
+            match symbol.kind {
+                SymbolKind::Text => (xcoff::XTY_SD, xcoff::XMC_PR),
+                SymbolKind::Data => {
+                    if section_kind == SectionKind::UninitializedData {
+                        (xcoff::XTY_CM, xcoff::XMC_BS)
+                    } else if section_kind == SectionKind::ReadOnlyData {
+                        (xcoff::XTY_SD, xcoff::XMC_RO)
+                    } else {
+                        (xcoff::XTY_SD, xcoff::XMC_RW)
+                    }
+                }
+                SymbolKind::Tls => {
+                    if section_kind == SectionKind::UninitializedTls {
+                        (xcoff::XTY_CM, xcoff::XMC_UL)
+                    } else {
+                        (xcoff::XTY_SD, xcoff::XMC_TL)
+                    }
+                }
+                _ => {
+                    return SymbolFlags::None;
+                }
+            }
+        } else {
+            (0, 0)
+        };
+        SymbolFlags::Xcoff {
+            n_sclass,
+            x_smtyp,
+            x_smclas,
+            containing_csect: None,
         }
     }
 
@@ -190,32 +276,25 @@ impl<'a> Object<'a> {
             symbol_offsets[index].index = symtab_count;
             symtab_count += 1;
 
-            let storage_class = if let SymbolFlags::Xcoff { n_sclass, .. } = symbol.flags {
-                n_sclass
-            } else {
-                match symbol.kind {
-                    SymbolKind::File => xcoff::C_FILE,
-                    SymbolKind::Text | SymbolKind::Data | SymbolKind::Tls => {
-                        if symbol.is_local() {
-                            xcoff::C_STAT
-                        } else if symbol.weak {
-                            xcoff::C_WEAKEXT
-                        } else {
-                            xcoff::C_EXT
-                        }
-                    }
-                    SymbolKind::Section | SymbolKind::Label | SymbolKind::Unknown => {
-                        return Err(Error(format!(
-                            "unimplemented symbol `{}` kind {:?}",
-                            symbol.name().unwrap_or(""),
-                            symbol.kind
-                        )));
-                    }
-                }
+            let SymbolFlags::Xcoff {
+                n_sclass,
+                x_smtyp,
+                x_smclas,
+                containing_csect,
+            } = self.symbol_flags(symbol)
+            else {
+                return Err(Error(format!(
+                    "unimplemented symbol `{}` kind {:?}",
+                    symbol.name().unwrap_or(""),
+                    symbol.kind
+                )));
             };
-            symbol_offsets[index].storage_class = storage_class;
+            symbol_offsets[index].storage_class = n_sclass;
+            symbol_offsets[index].x_smtyp = x_smtyp;
+            symbol_offsets[index].x_smclas = x_smclas;
+            symbol_offsets[index].containing_csect = containing_csect;
 
-            if storage_class == xcoff::C_FILE {
+            if n_sclass == xcoff::C_FILE {
                 if is_64 && file_str_id.is_none() {
                     file_str_id = Some(strtab.add(b".file"));
                 }
@@ -227,7 +306,7 @@ impl<'a> Object<'a> {
             }
 
             symbol_offsets[index].aux_count = 0;
-            match storage_class {
+            match n_sclass {
                 xcoff::C_FILE => {
                     symbol_offsets[index].aux_count = 1;
                     symtab_count += 1;
@@ -260,29 +339,29 @@ impl<'a> Object<'a> {
         // Write file header.
         if is_64 {
             let header = xcoff::FileHeader64 {
-                f_magic: U16::new(BE, xcoff::MAGIC_64),
-                f_nscns: U16::new(BE, self.sections.len() as u16),
-                f_timdat: U32::new(BE, 0),
-                f_symptr: U64::new(BE, symtab_offset as u64),
-                f_nsyms: U32::new(BE, symtab_count as u32),
-                f_opthdr: U16::new(BE, 0),
+                f_magic: xcoff::MAGIC_64.into(),
+                f_nscns: (self.sections.len() as u16).into(),
+                f_timdat: 0.into(),
+                f_symptr: (symtab_offset as u64).into(),
+                f_nsyms: (symtab_count as u32).into(),
+                f_opthdr: 0.into(),
                 f_flags: match self.flags {
-                    FileFlags::Xcoff { f_flags } => U16::new(BE, f_flags),
-                    _ => U16::default(),
+                    FileFlags::Xcoff { f_flags } => f_flags.into(),
+                    _ => 0.into(),
                 },
             };
             buffer.write(&header);
         } else {
             let header = xcoff::FileHeader32 {
-                f_magic: U16::new(BE, xcoff::MAGIC_32),
-                f_nscns: U16::new(BE, self.sections.len() as u16),
-                f_timdat: U32::new(BE, 0),
-                f_symptr: U32::new(BE, symtab_offset as u32),
-                f_nsyms: U32::new(BE, symtab_count as u32),
-                f_opthdr: U16::new(BE, 0),
+                f_magic: xcoff::MAGIC_32.into(),
+                f_nscns: (self.sections.len() as u16).into(),
+                f_timdat: 0.into(),
+                f_symptr: (symtab_offset as u32).into(),
+                f_nsyms: (symtab_count as u32).into(),
+                f_opthdr: 0.into(),
                 f_flags: match self.flags {
-                    FileFlags::Xcoff { f_flags } => U16::new(BE, f_flags),
-                    _ => U16::default(),
+                    FileFlags::Xcoff { f_flags } => f_flags.into(),
+                    _ => 0.into(),
                 },
             };
             buffer.write(&header);
@@ -300,68 +379,45 @@ impl<'a> Object<'a> {
                     ))
                 })?
                 .copy_from_slice(&section.name);
-            let flags = if let SectionFlags::Xcoff { s_flags } = section.flags {
-                s_flags
-            } else {
-                match section.kind {
-                    SectionKind::Text
-                    | SectionKind::ReadOnlyData
-                    | SectionKind::ReadOnlyString
-                    | SectionKind::ReadOnlyDataWithRel => xcoff::STYP_TEXT,
-                    SectionKind::Data => xcoff::STYP_DATA,
-                    SectionKind::UninitializedData => xcoff::STYP_BSS,
-                    SectionKind::Tls => xcoff::STYP_TDATA,
-                    SectionKind::UninitializedTls => xcoff::STYP_TBSS,
-                    SectionKind::OtherString => xcoff::STYP_INFO,
-                    SectionKind::Debug | SectionKind::DebugString => xcoff::STYP_DEBUG,
-                    SectionKind::Other | SectionKind::Metadata => 0,
-                    SectionKind::Note
-                    | SectionKind::Linker
-                    | SectionKind::Common
-                    | SectionKind::Unknown
-                    | SectionKind::TlsVariables
-                    | SectionKind::Elf(_) => {
-                        return Err(Error(format!(
-                            "unimplemented section `{}` kind {:?}",
-                            section.name().unwrap_or(""),
-                            section.kind
-                        )));
-                    }
-                }
-                .into()
+            let SectionFlags::Xcoff { s_flags } = self.section_flags(section) else {
+                return Err(Error(format!(
+                    "unimplemented section `{}` kind {:?}",
+                    section.name().unwrap_or(""),
+                    section.kind
+                )));
             };
             if is_64 {
                 let section_header = xcoff::SectionHeader64 {
                     s_name: sectname,
-                    s_paddr: U64::new(BE, section_offsets[index].address),
+                    s_paddr: section_offsets[index].address.into(),
                     // This field has the same value as the s_paddr field.
-                    s_vaddr: U64::new(BE, section_offsets[index].address),
-                    s_size: U64::new(BE, section.data.len() as u64),
-                    s_scnptr: U64::new(BE, section_offsets[index].data_offset as u64),
-                    s_relptr: U64::new(BE, section_offsets[index].reloc_offset as u64),
-                    s_lnnoptr: U64::new(BE, 0),
-                    s_nreloc: U32::new(BE, section.relocations.len() as u32),
-                    s_nlnno: U32::new(BE, 0),
-                    s_flags: U32::new(BE, flags),
-                    s_reserve: U32::new(BE, 0),
+                    s_vaddr: section_offsets[index].address.into(),
+                    s_size: (section.data.len() as u64).into(),
+                    s_scnptr: (section_offsets[index].data_offset as u64).into(),
+                    s_relptr: (section_offsets[index].reloc_offset as u64).into(),
+                    s_lnnoptr: 0.into(),
+                    s_nreloc: (section.relocations.len() as u32).into(),
+                    s_nlnno: 0.into(),
+                    s_flags: s_flags.into(),
+                    s_reserve: 0.into(),
                 };
                 buffer.write(&section_header);
             } else {
                 let section_header = xcoff::SectionHeader32 {
                     s_name: sectname,
-                    s_paddr: U32::new(BE, section_offsets[index].address as u32),
+                    s_paddr: (section_offsets[index].address as u32).into(),
                     // This field has the same value as the s_paddr field.
-                    s_vaddr: U32::new(BE, section_offsets[index].address as u32),
-                    s_size: U32::new(BE, section.data.len() as u32),
-                    s_scnptr: U32::new(BE, section_offsets[index].data_offset as u32),
-                    s_relptr: U32::new(BE, section_offsets[index].reloc_offset as u32),
-                    s_lnnoptr: U32::new(BE, 0),
+                    s_vaddr: (section_offsets[index].address as u32).into(),
+                    s_size: (section.data.len() as u32).into(),
+                    s_scnptr: (section_offsets[index].data_offset as u32).into(),
+                    s_relptr: (section_offsets[index].reloc_offset as u32).into(),
+                    s_lnnoptr: 0.into(),
                     // TODO: If more than 65,534 relocation entries are required, the field
                     // value will be 65535, and an STYP_OVRFLO section header will contain
                     // the actual count of relocation entries in the s_paddr field.
-                    s_nreloc: U16::new(BE, section.relocations.len() as u16),
-                    s_nlnno: U16::new(BE, 0),
-                    s_flags: U32::new(BE, flags),
+                    s_nreloc: (section.relocations.len() as u16).into(),
+                    s_nlnno: 0.into(),
+                    s_flags: s_flags.into(),
                 };
                 buffer.write(&section_header);
             }
@@ -390,16 +446,16 @@ impl<'a> Object<'a> {
                         };
                     if is_64 {
                         let xcoff_rel = xcoff::Rel64 {
-                            r_vaddr: U64::new(BE, reloc.offset),
-                            r_symndx: U32::new(BE, symbol_offsets[reloc.symbol.0].index as u32),
+                            r_vaddr: reloc.offset.into(),
+                            r_symndx: (symbol_offsets[reloc.symbol.0].index as u32).into(),
                             r_rsize,
                             r_rtype,
                         };
                         buffer.write(&xcoff_rel);
                     } else {
                         let xcoff_rel = xcoff::Rel32 {
-                            r_vaddr: U32::new(BE, reloc.offset as u32),
-                            r_symndx: U32::new(BE, symbol_offsets[reloc.symbol.0].index as u32),
+                            r_vaddr: (reloc.offset as u32).into(),
+                            r_symndx: (symbol_offsets[reloc.symbol.0].index as u32).into(),
                             r_rsize,
                             r_rtype,
                         };
@@ -412,13 +468,10 @@ impl<'a> Object<'a> {
         // Write symbols.
         debug_assert_eq!(symtab_offset, buffer.len());
         for (index, symbol) in self.symbols.iter().enumerate() {
-            let (n_value, section_kind) = if let SymbolSection::Section(id) = symbol.section {
-                (
-                    section_offsets[id.0].address + symbol.value,
-                    self.sections[id.0].kind,
-                )
+            let n_value = if let SymbolSection::Section(id) = symbol.section {
+                section_offsets[id.0].address + symbol.value
             } else {
-                (symbol.value, SectionKind::Unknown)
+                symbol.value
             };
             let n_scnum = match symbol.section {
                 SymbolSection::None => {
@@ -447,10 +500,10 @@ impl<'a> Object<'a> {
                     symbol_offsets[index].str_id.unwrap()
                 };
                 let xcoff_sym = xcoff::Symbol64 {
-                    n_value: U64::new(BE, n_value),
-                    n_offset: U32::new(BE, strtab.get_offset(str_id) as u32),
-                    n_scnum: I16::new(BE, n_scnum),
-                    n_type: U16::new(BE, n_type),
+                    n_value: n_value.into(),
+                    n_offset: (strtab.get_offset(str_id) as u32).into(),
+                    n_scnum: n_scnum.into(),
+                    n_type: n_type.into(),
                     n_sclass,
                     n_numaux,
                 };
@@ -467,9 +520,9 @@ impl<'a> Object<'a> {
                 }
                 let xcoff_sym = xcoff::Symbol32 {
                     n_name: sym_name,
-                    n_value: U32::new(BE, n_value as u32),
-                    n_scnum: I16::new(BE, n_scnum),
-                    n_type: U16::new(BE, n_type),
+                    n_value: (n_value as u32).into(),
+                    n_scnum: n_scnum.into(),
+                    n_type: n_type.into(),
                     n_sclass,
                     n_numaux,
                 };
@@ -508,43 +561,9 @@ impl<'a> Object<'a> {
                 || n_sclass == xcoff::C_HIDEXT
             {
                 debug_assert_eq!(n_numaux, 1);
-                let (x_smtyp, x_smclas) = if let SymbolFlags::Xcoff {
-                    x_smtyp, x_smclas, ..
-                } = symbol.flags
-                {
-                    (x_smtyp, x_smclas)
-                } else {
-                    match symbol.kind {
-                        SymbolKind::Text => (xcoff::XTY_SD, xcoff::XMC_PR),
-                        SymbolKind::Data => {
-                            if section_kind == SectionKind::UninitializedData {
-                                (xcoff::XTY_CM, xcoff::XMC_BS)
-                            } else if section_kind == SectionKind::ReadOnlyData {
-                                (xcoff::XTY_SD, xcoff::XMC_RO)
-                            } else {
-                                (xcoff::XTY_SD, xcoff::XMC_RW)
-                            }
-                        }
-                        SymbolKind::Tls => {
-                            if section_kind == SectionKind::UninitializedTls {
-                                (xcoff::XTY_CM, xcoff::XMC_UL)
-                            } else {
-                                (xcoff::XTY_SD, xcoff::XMC_TL)
-                            }
-                        }
-                        _ => {
-                            return Err(Error(format!(
-                                "unimplemented symbol `{}` kind {:?}",
-                                symbol.name().unwrap_or(""),
-                                symbol.kind
-                            )));
-                        }
-                    }
-                };
-                let scnlen = if let SymbolFlags::Xcoff {
-                    containing_csect: Some(containing_csect),
-                    ..
-                } = symbol.flags
+                let x_smtyp = symbol_offsets[index].x_smtyp;
+                let x_smclas = symbol_offsets[index].x_smclas;
+                let scnlen = if let Some(containing_csect) = symbol_offsets[index].containing_csect
                 {
                     symbol_offsets[containing_csect.0].index as u64
                 } else {
@@ -552,10 +571,10 @@ impl<'a> Object<'a> {
                 };
                 if is_64 {
                     let csect_aux = xcoff::CsectAux64 {
-                        x_scnlen_lo: U32::new(BE, (scnlen & 0xFFFFFFFF) as u32),
-                        x_scnlen_hi: U32::new(BE, ((scnlen >> 32) & 0xFFFFFFFF) as u32),
-                        x_parmhash: U32::new(BE, 0),
-                        x_snhash: U16::new(BE, 0),
+                        x_scnlen_lo: ((scnlen & 0xFFFFFFFF) as u32).into(),
+                        x_scnlen_hi: (((scnlen >> 32) & 0xFFFFFFFF) as u32).into(),
+                        x_parmhash: 0.into(),
+                        x_snhash: 0.into(),
                         x_smtyp,
                         x_smclas,
                         pad: 0,
@@ -564,13 +583,13 @@ impl<'a> Object<'a> {
                     buffer.write(&csect_aux);
                 } else {
                     let csect_aux = xcoff::CsectAux32 {
-                        x_scnlen: U32::new(BE, scnlen as u32),
-                        x_parmhash: U32::new(BE, 0),
-                        x_snhash: U16::new(BE, 0),
+                        x_scnlen: (scnlen as u32).into(),
+                        x_parmhash: 0.into(),
+                        x_snhash: 0.into(),
                         x_smtyp,
                         x_smclas,
-                        x_stab: U32::new(BE, 0),
-                        x_snstab: U16::new(BE, 0),
+                        x_stab: 0.into(),
+                        x_snstab: 0.into(),
                     };
                     buffer.write(&csect_aux);
                 }

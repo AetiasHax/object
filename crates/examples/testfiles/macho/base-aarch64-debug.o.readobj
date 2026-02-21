@@ -41,6 +41,8 @@ SegmentCommand {
             S_REGULAR (0x0)
             S_ATTR_PURE_INSTRUCTIONS (0x80000000)
             S_ATTR_SOME_INSTRUCTIONS (0x400)
+        Reserved1: 0x0
+        Reserved2: 0x0
         RelocationInfo {
             Address: 0x20
             Extern: yes
@@ -77,6 +79,8 @@ SegmentCommand {
         RelocationOffset: 0x0
         NumberOfRelocations: 0x0
         Flags: S_CSTRING_LITERALS (0x2)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 3
@@ -91,6 +95,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 4
@@ -105,6 +111,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
         RelocationInfo {
             Address: 0x33
             Extern: no
@@ -135,6 +143,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 6
@@ -149,6 +159,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 7
@@ -163,6 +175,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 8
@@ -177,6 +191,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 9
@@ -191,6 +207,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
     }
     Section {
         Index: 10
@@ -205,6 +223,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
         RelocationInfo {
             Address: 0x0
             Extern: no
@@ -227,6 +247,8 @@ SegmentCommand {
         Flags: 0x2000000
             S_REGULAR (0x0)
             S_ATTR_DEBUG (0x2000000)
+        Reserved1: 0x0
+        Reserved2: 0x0
         RelocationInfo {
             Address: 0x2B
             Extern: no
@@ -241,8 +263,8 @@ BuildVersionCommand {
     Cmd: LC_BUILD_VERSION (0x32)
     CmdSize: 0x18
     Platform: PLATFORM_MACOS (0x1)
-    MinOs: 0xD0000
-    Sdk: 0xD0300
+    MinOs: 13.0.0
+    Sdk: 13.3.0
     NumberOfTools: 0x0
 }
 SymtabCommand {
